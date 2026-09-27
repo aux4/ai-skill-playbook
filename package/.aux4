@@ -1,7 +1,7 @@
 {
   "scope": "agent",
   "name": "skill-playbook",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "license": "Apache-2.0",
   "description": "Native agent skill: record, match and replay saved sequences of aux4 commands (playbooks) for a task",
   "tags": [
@@ -158,6 +158,97 @@
                   "jev",
                   "bm25"
                 ]
+              },
+              {
+                "name": "model",
+                "text": "Model id for the jev provider (advanced; usually left to the provider's default)",
+                "default": ""
+              },
+              {
+                "name": "baseUrl",
+                "text": "Override the jev provider API base URL (advanced; used for testing)",
+                "default": ""
+              },
+              {
+                "name": "apiKey",
+                "text": "TypeSafe API key for the jev provider",
+                "env": "TYPESAFE_API_KEY",
+                "hide": true,
+                "default": ""
+              }
+            ]
+          }
+        },
+        {
+          "name": "hook-before",
+          "execute": [
+            "node ${packageDir}/lib/playbook.mjs hook-before values(request, folder, threshold, model, baseUrl, apiKey)"
+          ],
+          "help": {
+            "text": "Deterministic pre-task hook: match the request against saved playbooks (jev only) and, on a confident match, print a short instruction block with the id, what it does, its params, and the exact `run` command to call. Prints nothing on a non-match, on any failure (jev down, no playbooks saved), or when --request is empty. Always exits 0.",
+            "variables": [
+              {
+                "name": "request",
+                "text": "The user's request or task, in plain language",
+                "default": ""
+              },
+              {
+                "name": "folder",
+                "text": "Playbook storage folder",
+                "default": ".agent/playbooks"
+              },
+              {
+                "name": "threshold",
+                "text": "Minimum confidence (0.0-1.0) required to report a match",
+                "default": "0.5"
+              },
+              {
+                "name": "model",
+                "text": "Model id for the jev provider (advanced; usually left to the provider's default)",
+                "default": ""
+              },
+              {
+                "name": "baseUrl",
+                "text": "Override the jev provider API base URL (advanced; used for testing)",
+                "default": ""
+              },
+              {
+                "name": "apiKey",
+                "text": "TypeSafe API key for the jev provider",
+                "env": "TYPESAFE_API_KEY",
+                "hide": true,
+                "default": ""
+              }
+            ]
+          }
+        },
+        {
+          "name": "hook-after",
+          "execute": [
+            "node ${packageDir}/lib/playbook.mjs hook-after values(request, history, folder, threshold, model, baseUrl, apiKey)"
+          ],
+          "help": {
+            "text": "Deterministic post-task hook: if the run made 2+ executeAux4 calls that succeeded and no saved playbook was just replayed, ask jev whether this looks like a repeatable task worth saving. Above --threshold, prints a one-line suggestion for the user plus the exact `save` command to run next turn if they agree. Prints nothing otherwise, or on any failure. Never saves by itself. Always exits 0.",
+            "variables": [
+              {
+                "name": "request",
+                "text": "The user's request or task, in plain language",
+                "default": ""
+              },
+              {
+                "name": "history",
+                "text": "Path to the ai-agent history file (.agent/history/<conversation>.json) for this turn",
+                "default": ""
+              },
+              {
+                "name": "folder",
+                "text": "Playbook storage folder",
+                "default": ".agent/playbooks"
+              },
+              {
+                "name": "threshold",
+                "text": "Minimum jev probability (0.0-1.0) required to suggest saving",
+                "default": "0.5"
               },
               {
                 "name": "model",

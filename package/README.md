@@ -42,6 +42,8 @@ aux4 ai skill playbook run deploy-service/deploy-service --params '{"service":"b
 | `aux4 ai skill playbook match "<request>"` | Ask whether a saved playbook fits a new request |
 | `aux4 ai skill playbook run <id> --params '<json>'` | Deterministically replay a playbook |
 | `aux4 ai skill playbook delete <id>` | Remove a saved playbook |
+| `aux4 ai skill playbook hook-before --request "<text>"` | Deterministic pre-task hook: print a run instruction on a confident jev match |
+| `aux4 ai skill playbook hook-after --request "<text>" --history <file>` | Deterministic post-task hook: suggest saving a new playbook when jev thinks it's worth it |
 
 ## Storage
 
@@ -154,6 +156,55 @@ aux4 ai skill playbook match "what's the status of the billing service?" --provi
   ]
 }
 ```
+
+## Deterministic hooks for aux4/ai-agent
+
+`hook-before` and `hook-after` are meant to be called by `aux4/ai-agent` before and after every ask,
+so the agent doesn't have to remember to call `match`/suggest saving itself. Both are best-effort and
+**never fail the turn** — any error (jev down, no playbooks, bad history file) results in printing
+nothing and exiting `0`; there is nothing else for the caller to check.
+
+### hook-before — offer a matching playbook
+
+Ranks the request against saved playbooks the same way `match` does, but **jev only, no bm25
+fallback** — a lexical score isn't confident enough to hand the agent a ready-to-run command. On a
+confident match it prints the playbook id, its description, its params, and the exact `run` command
+to call, filling params from the request where the value is an obvious text match (best-effort — the
+agent should still sanity-check them):
+
+```bash
+aux4 ai skill playbook hook-before --request "deploy the billing service to staging"
+```
+
+```text
+Playbook match: deploy-service (confidence 0.91)
+Deploy a service to an environment and check its status
+Params: service, env
+Run: aux4 ai skill playbook run --id deploy-service --params '{"service":"billing","env":"staging"}'
+```
+
+No match (or jev unavailable) prints nothing at all.
+
+### hook-after — suggest saving a new playbook
+
+Looks at the turn's `executeAux4` calls in `--history`. When there are 2+ calls, at least 2
+succeeded, no saved playbook was just replayed, and jev (`aux4 classify ask --type noul`) scores the
+task as repeatable above `--threshold` (default `0.5`), it prints a suggestion plus the exact `save`
+command for the agent to run **only if the user agrees**:
+
+```bash
+aux4 ai skill playbook hook-after \
+  --request "deploy billing to staging and check its status" \
+  --history .agent/history/2026-09-26-session.json
+```
+
+```text
+Save this as a playbook? Reply "save it" and I'll record it as deploy-billing-to-staging-and-check.
+Run: aux4 ai skill playbook save "deploy-billing-to-staging-and-check" --description "deploy billing to staging and check its status" --history .agent/history/2026-09-26-session.json --folder .agent/playbooks
+```
+
+**`hook-after` never calls `save` itself** — it only ever prints the command for the agent to run
+after the user says yes.
 
 ## Replaying a playbook
 

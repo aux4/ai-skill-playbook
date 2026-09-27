@@ -6,6 +6,11 @@ library of proven sequences over time.
 
 Scope is **aux4 commands only** — a playbook is a list of `aux4 ...` commands, nothing else.
 
+**Note:** a host agent (e.g. `aux4/ai-agent`) may already call `hook-before`/`hook-after`
+deterministically before and after every ask on your behalf — check for their output first. The
+manual workflow below (calling `match` yourself, suggesting a save yourself) is for a host that
+doesn't wire up the hooks, or for you to double-check a hook's suggestion.
+
 ## Commands
 
 | Command | Description |

@@ -545,6 +545,167 @@ function actionMatch({ request, folder, threshold, provider, model, baseUrl, api
   }, null, 2));
 }
 
+// --- hook-before / hook-after --------------------------------------------------
+//
+// These back `aux4 ai skill playbook hook-before` / `hook-after`, the deterministic
+// hooks aux4/ai-agent calls before and after every ask. Both are best-effort and
+// MUST NEVER fail the turn: any error (jev down, no playbooks, bad history file)
+// is swallowed and results in printing nothing, exit 0. Neither ever saves or runs
+// anything on its own -- hook-before only prints instructions for the agent to act
+// on; hook-after only prints a suggestion for the agent to relay to the user.
+
+// Best-effort extraction of a param's value from the request text: looks for the
+// param name followed by a connector (=, :, "is", "to") and a token or quoted
+// phrase. Returns null when nothing obvious is found -- the caller falls back to
+// a `{{param}}` placeholder so the agent knows to fill it in itself.
+function extractParamValue(request, paramName) {
+  const escaped = String(paramName).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`${escaped}\\s*(?:is|=|:|to)?\\s*("[^"]+"|'[^']+'|[A-Za-z0-9_.-]+)`, "i");
+  const m = String(request || "").match(re);
+  if (!m) return null;
+  return m[1].replace(/^["']|["']$/g, "");
+}
+
+function actionHookBefore({ request, folder, threshold, model, baseUrl, apiKey }) {
+  try {
+    if (!request) return;
+    const docs = listPlaybooks(folder);
+    if (docs.length === 0) return;
+
+    const blocks = docs.map(d => ({ id: d.id, text: `${d.name}: ${d.description || ""}`.trim() }));
+    const thresholdNum = threshold ? Number(threshold) : 0.5;
+    const args = ["classify", "rank", "--provider", "jev", "--question", request, "--blocks", JSON.stringify(blocks), "--top", "1"];
+    if (model) args.push("--model", model);
+    if (baseUrl) args.push("--baseUrl", baseUrl);
+    if (apiKey) args.push("--apiKey", apiKey);
+
+    // hook-before only trusts jev's own decision -- no bm25 fallback here (unlike
+    // `match`): a lexical score is not confident enough to hand an agent a ready-
+    // to-run command.
+    const result = runAux4(args);
+    if (result.scale !== "probability") return;
+
+    const best = (result.blocks || [])[0];
+    if (!best || best.score < thresholdNum) return;
+
+    const doc = docs.find(d => d.id === best.id);
+    if (!doc) return;
+
+    const params = doc.params || [];
+    const filled = {};
+    for (const p of params) {
+      const value = extractParamValue(request, p);
+      filled[p] = value !== null ? value : `{{${p}}}`;
+    }
+
+    const lines = [
+      `Playbook match: ${doc.id} (confidence ${round(best.score)})`,
+      doc.description || doc.name,
+      `Params: ${params.length ? params.join(", ") : "none"}`,
+      `Run: aux4 ai skill playbook run --id ${doc.id} --params '${JSON.stringify(filled)}'`
+    ];
+    console.log(lines.join("\n"));
+  } catch {
+    // any failure -- jev down, no playbooks, malformed response -- prints nothing
+  }
+}
+
+// Walks an ai-agent history file and returns every executeAux4 call in order,
+// each with a best-effort `success` flag from its matching tool result (an
+// aux4 error always starts with "Error", by convention across the CLI). When a
+// call's result can't be found (e.g. a raw OpenAI-shaped history with no
+// tool_call_id correlation available), it is treated as successful -- this
+// function only needs to be conservative about the count of successful calls,
+// not exhaustive about every history shape.
+function extractExecuteAux4CallsWithResults(history) {
+  const calls = [];
+  const results = {};
+
+  function walk(node) {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item);
+      return;
+    }
+    if (node.name === "executeAux4" && node.args && typeof node.args.command === "string") {
+      calls.push({ id: node.id || null, command: node.args.command });
+    } else if (node.function && node.function.name === "executeAux4" && typeof node.function.arguments === "string") {
+      try {
+        const args = JSON.parse(node.function.arguments);
+        if (typeof args.command === "string") calls.push({ id: node.id || null, command: args.command });
+      } catch {
+        // skip malformed arguments
+      }
+    } else if (node.tool_call_id && node.name === "executeAux4" && typeof node.content === "string") {
+      results[node.tool_call_id] = node.content;
+    }
+    for (const value of Object.values(node)) {
+      if (value && typeof value === "object") walk(value);
+    }
+  }
+  walk(history);
+
+  return calls.map(c => {
+    const content = c.id ? results[c.id] : undefined;
+    const success = content === undefined || !/^\s*error[: ]/i.test(content);
+    return { command: toFullForm(c.command), success };
+  });
+}
+
+function actionHookAfter({ request, historyFile, folder, threshold, model, baseUrl, apiKey }) {
+  try {
+    if (!request || !historyFile) return;
+    if (!fs.existsSync(historyFile)) return;
+
+    let history;
+    try {
+      history = readJson(historyFile);
+    } catch {
+      return;
+    }
+
+    const calls = extractExecuteAux4CallsWithResults(history);
+    if (calls.length < 2) return;
+
+    // "no playbook was just run" -- if the agent already replayed a saved
+    // playbook this turn, there is nothing new to suggest saving.
+    if (calls.some(c => /\bai\s+skill\s+playbook\s+run\b/.test(c.command))) return;
+
+    const successCount = calls.filter(c => c.success).length;
+    if (successCount < 2) return;
+
+    const thresholdNum = threshold ? Number(threshold) : 0.5;
+    const state = `Request: ${request}\nCommands run:\n${calls.map(c => `- ${c.command}`).join("\n")}`;
+    const args = [
+      "classify", "ask",
+      "Is this a repeatable multi-step task worth saving as a reusable playbook for future similar requests?",
+      "--type", "noul",
+      "--state", state,
+      "--threshold", String(thresholdNum),
+      "--provider", "jev"
+    ];
+    if (model) args.push("--model", model);
+    if (baseUrl) args.push("--baseUrl", baseUrl);
+    if (apiKey) args.push("--apiKey", apiKey);
+
+    // `classify ask --type noul` exits 0 when the probability clears --threshold,
+    // 1 when it doesn't -- exactly the yes/no this hook needs, no output parsing.
+    const res = spawnSync("aux4", args, { encoding: "utf-8", timeout: 20000 });
+    if (res.error || res.status !== 0) return;
+
+    const folderArg = folder || ".agent/playbooks";
+    const suggestedName = slugify(request.split(/\s+/).slice(0, 6).join(" "));
+    const description = String(request).replace(/"/g, '\\"');
+    const lines = [
+      `Save this as a playbook? Reply "save it" and I'll record it as ${suggestedName}.`,
+      `Run: aux4 ai skill playbook save "${suggestedName}" --description "${description}" --history ${historyFile} --folder ${folderArg}`
+    ];
+    console.log(lines.join("\n"));
+  } catch {
+    // any failure -- jev down, bad history file -- prints nothing; never save
+  }
+}
+
 // --- run ---------------------------------------------------------------------
 
 // Fills `{{param}}` placeholders token by token (never re-joining into a string
@@ -661,6 +822,16 @@ switch (action) {
   case "run": {
     const [id, params, folder] = rest;
     actionRun({ id, params, folder });
+    break;
+  }
+  case "hook-before": {
+    const [request, folder, threshold, model, baseUrl, apiKey] = rest;
+    actionHookBefore({ request, folder, threshold, model, baseUrl, apiKey });
+    break;
+  }
+  case "hook-after": {
+    const [request, historyFile, folder, threshold, model, baseUrl, apiKey] = rest;
+    actionHookAfter({ request, historyFile, folder, threshold, model, baseUrl, apiKey });
     break;
   }
   case "delete": {

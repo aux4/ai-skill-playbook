@@ -719,6 +719,370 @@ N=$(TYPESAFE_API_KEY=test-key AUX4_INFERENCE_BROKER_URL= aux4 ai skill playbook 
 labeled: yes
 ```
 
+## hook-before -- deterministic pre-task hook (jev only, no bm25 fallback)
+
+```beforeAll
+mkdir -p /tmp/aux4-skill-playbook-test/hook-playbooks
+aux4 mock start --port 7294 --name skill-playbook-hook-before-jev-test
+sleep 1
+```
+
+```afterAll
+aux4 mock stop --name skill-playbook-hook-before-jev-test
+```
+
+### should print nothing and exit 0 when --request is empty
+
+```execute
+aux4 ai skill playbook hook-before --folder /tmp/aux4-skill-playbook-test/hook-playbooks; echo "exit=$?"
+```
+
+```expect
+exit=0
+```
+
+### should print nothing and exit 0 when no playbooks are saved
+
+```execute
+aux4 ai skill playbook hook-before --request "deploy billing to staging" --folder /tmp/aux4-skill-playbook-test/hook-playbooks/empty; echo "exit=$?"
+```
+
+```expect
+exit=0
+```
+
+### seed one playbook to match against
+
+```execute
+aux4 ai skill playbook save "deploy-service" --description "Deploy a service to an environment and check its status" --params "service,env" --steps '["aux4 deploy run --service {{service}} --env {{env}}"]' --folder /tmp/aux4-skill-playbook-test/hook-playbooks | grep -o '"id": "deploy-service"'
+```
+
+```expect
+"id": "deploy-service"
+```
+
+### on a confident jev match, prints the id, description, params and exact run command, filling obvious params from the request
+
+```beforeEach
+aux4 mock reset --name skill-playbook-hook-before-jev-test
+aux4 mock stub --name skill-playbook-hook-before-jev-test --method POST --path /v1/systemone --status 200 --body '{"model":"jev-1.13.0","answers":{"blk0":{"type":"noul","noul":0.9}},"usage":{"input_tokens":12,"output_tokens":0}}'
+```
+
+```execute
+TYPESAFE_API_KEY=test-key AUX4_INFERENCE_BROKER_URL= aux4 ai skill playbook hook-before --request "please deploy service billing to env staging" --baseUrl http://localhost:7294/api --folder /tmp/aux4-skill-playbook-test/hook-playbooks
+```
+
+```expect
+Playbook match: deploy-service (confidence 0.9)
+Deploy a service to an environment and check its status
+Params: service, env
+Run: aux4 ai skill playbook run --id deploy-service --params '{"service":"billing","env":"staging"}'
+```
+
+### below the confidence threshold, prints nothing
+
+```beforeEach
+aux4 mock reset --name skill-playbook-hook-before-jev-test
+aux4 mock stub --name skill-playbook-hook-before-jev-test --method POST --path /v1/systemone --status 200 --body '{"model":"jev-1.13.0","answers":{"blk0":{"type":"noul","noul":0.3}}}'
+```
+
+```execute
+TYPESAFE_API_KEY=test-key AUX4_INFERENCE_BROKER_URL= aux4 ai skill playbook hook-before --request "please deploy service billing to env staging" --baseUrl http://localhost:7294/api --folder /tmp/aux4-skill-playbook-test/hook-playbooks; echo "exit=$?"
+```
+
+```expect
+exit=0
+```
+
+### when jev is unreachable, prints nothing -- no bm25 fallback for this hook
+
+```execute
+TYPESAFE_API_KEY=test-key AUX4_INFERENCE_BROKER_URL= aux4 ai skill playbook hook-before --request "please deploy service billing to env staging" --baseUrl http://localhost:1/api --folder /tmp/aux4-skill-playbook-test/hook-playbooks; echo "exit=$?"
+```
+
+```expect
+exit=0
+```
+
+## hook-after -- deterministic post-task hook (jev decides if worth saving, never saves itself)
+
+```beforeAll
+mkdir -p /tmp/aux4-skill-playbook-test/hook-playbooks
+aux4 mock start --port 7295 --name skill-playbook-hook-after-jev-test
+sleep 1
+```
+
+```afterAll
+aux4 mock stop --name skill-playbook-hook-after-jev-test
+```
+
+```file:.agent/history/hook-two-success.json
+[
+  { "role": "user", "content": "deploy billing to staging and check its status" },
+  {
+    "role": "assistant_with_tool",
+    "content": {
+      "lc": 1,
+      "type": "constructor",
+      "id": ["langchain_core", "messages", "AIMessage"],
+      "kwargs": {
+        "content": "",
+        "tool_calls": [
+          { "name": "executeAux4", "args": { "command": "deploy run --service billing --env staging" }, "type": "tool_call", "id": "call_1" }
+        ]
+      }
+    }
+  },
+  {
+    "role": "tool",
+    "content": {
+      "lc": 1,
+      "type": "constructor",
+      "id": ["langchain_core", "messages", "ToolMessage"],
+      "kwargs": { "content": "deployed", "tool_call_id": "call_1", "name": "executeAux4" }
+    }
+  },
+  {
+    "role": "assistant_with_tool",
+    "content": {
+      "lc": 1,
+      "type": "constructor",
+      "id": ["langchain_core", "messages", "AIMessage"],
+      "kwargs": {
+        "content": "",
+        "tool_calls": [
+          { "name": "executeAux4", "args": { "command": "aux4 deploy status --service billing" }, "type": "tool_call", "id": "call_2" }
+        ]
+      }
+    }
+  },
+  {
+    "role": "tool",
+    "content": {
+      "lc": 1,
+      "type": "constructor",
+      "id": ["langchain_core", "messages", "ToolMessage"],
+      "kwargs": { "content": "running", "tool_call_id": "call_2", "name": "executeAux4" }
+    }
+  },
+  { "role": "assistant", "content": "Deployed and running." }
+]
+```
+
+```file:.agent/history/hook-one-success.json
+[
+  { "role": "user", "content": "check billing status" },
+  {
+    "role": "assistant_with_tool",
+    "content": {
+      "lc": 1,
+      "type": "constructor",
+      "id": ["langchain_core", "messages", "AIMessage"],
+      "kwargs": {
+        "content": "",
+        "tool_calls": [
+          { "name": "executeAux4", "args": { "command": "deploy status --service billing" }, "type": "tool_call", "id": "call_1" }
+        ]
+      }
+    }
+  },
+  {
+    "role": "tool",
+    "content": {
+      "lc": 1,
+      "type": "constructor",
+      "id": ["langchain_core", "messages", "ToolMessage"],
+      "kwargs": { "content": "running", "tool_call_id": "call_1", "name": "executeAux4" }
+    }
+  }
+]
+```
+
+```file:.agent/history/hook-one-failed.json
+[
+  { "role": "user", "content": "deploy billing to staging and check its status" },
+  {
+    "role": "assistant_with_tool",
+    "content": {
+      "lc": 1,
+      "type": "constructor",
+      "id": ["langchain_core", "messages", "AIMessage"],
+      "kwargs": {
+        "content": "",
+        "tool_calls": [
+          { "name": "executeAux4", "args": { "command": "deploy run --service billing --env staging" }, "type": "tool_call", "id": "call_1" }
+        ]
+      }
+    }
+  },
+  {
+    "role": "tool",
+    "content": {
+      "lc": 1,
+      "type": "constructor",
+      "id": ["langchain_core", "messages", "ToolMessage"],
+      "kwargs": { "content": "Error: environment not found", "tool_call_id": "call_1", "name": "executeAux4" }
+    }
+  },
+  {
+    "role": "assistant_with_tool",
+    "content": {
+      "lc": 1,
+      "type": "constructor",
+      "id": ["langchain_core", "messages", "AIMessage"],
+      "kwargs": {
+        "content": "",
+        "tool_calls": [
+          { "name": "executeAux4", "args": { "command": "aux4 deploy status --service billing" }, "type": "tool_call", "id": "call_2" }
+        ]
+      }
+    }
+  },
+  {
+    "role": "tool",
+    "content": {
+      "lc": 1,
+      "type": "constructor",
+      "id": ["langchain_core", "messages", "ToolMessage"],
+      "kwargs": { "content": "running", "tool_call_id": "call_2", "name": "executeAux4" }
+    }
+  }
+]
+```
+
+```file:.agent/history/hook-playbook-already-run.json
+[
+  { "role": "user", "content": "deploy billing to staging and check its status" },
+  {
+    "role": "assistant_with_tool",
+    "content": {
+      "lc": 1,
+      "type": "constructor",
+      "id": ["langchain_core", "messages", "AIMessage"],
+      "kwargs": {
+        "content": "",
+        "tool_calls": [
+          { "name": "executeAux4", "args": { "command": "ai skill playbook run deploy-service --params {\"service\":\"billing\",\"env\":\"staging\"}" }, "type": "tool_call", "id": "call_1" }
+        ]
+      }
+    }
+  },
+  {
+    "role": "tool",
+    "content": {
+      "lc": 1,
+      "type": "constructor",
+      "id": ["langchain_core", "messages", "ToolMessage"],
+      "kwargs": { "content": "success", "tool_call_id": "call_1", "name": "executeAux4" }
+    }
+  },
+  {
+    "role": "assistant_with_tool",
+    "content": {
+      "lc": 1,
+      "type": "constructor",
+      "id": ["langchain_core", "messages", "AIMessage"],
+      "kwargs": {
+        "content": "",
+        "tool_calls": [
+          { "name": "executeAux4", "args": { "command": "aux4 deploy status --service billing" }, "type": "tool_call", "id": "call_2" }
+        ]
+      }
+    }
+  },
+  {
+    "role": "tool",
+    "content": {
+      "lc": 1,
+      "type": "constructor",
+      "id": ["langchain_core", "messages", "ToolMessage"],
+      "kwargs": { "content": "running", "tool_call_id": "call_2", "name": "executeAux4" }
+    }
+  }
+]
+```
+
+### should print nothing and exit 0 when --request or --history is missing
+
+```execute
+aux4 ai skill playbook hook-after --history .agent/history/hook-two-success.json --folder /tmp/aux4-skill-playbook-test/hook-playbooks; echo "exit=$?"
+```
+
+```expect
+exit=0
+```
+
+### should print nothing when the history has fewer than 2 executeAux4 calls
+
+```execute
+aux4 ai skill playbook hook-after --request "check billing status" --history .agent/history/hook-one-success.json --folder /tmp/aux4-skill-playbook-test/hook-playbooks; echo "exit=$?"
+```
+
+```expect
+exit=0
+```
+
+### should print nothing when fewer than 2 of the calls succeeded
+
+```execute
+aux4 ai skill playbook hook-after --request "deploy billing to staging and check its status" --history .agent/history/hook-one-failed.json --folder /tmp/aux4-skill-playbook-test/hook-playbooks; echo "exit=$?"
+```
+
+```expect
+exit=0
+```
+
+### should print nothing when a saved playbook was just replayed this turn
+
+```execute
+aux4 ai skill playbook hook-after --request "deploy billing to staging and check its status" --history .agent/history/hook-playbook-already-run.json --folder /tmp/aux4-skill-playbook-test/hook-playbooks; echo "exit=$?"
+```
+
+```expect
+exit=0
+```
+
+### with 2+ successful calls and jev below the threshold, prints nothing
+
+```beforeEach
+aux4 mock reset --name skill-playbook-hook-after-jev-test
+aux4 mock stub --name skill-playbook-hook-after-jev-test --method POST --path /v1/systemone --status 200 --body '{"model":"jev-1.13.0","answers":{"answer":{"type":"noul","noul":0.2}}}'
+```
+
+```execute
+TYPESAFE_API_KEY=test-key AUX4_INFERENCE_BROKER_URL= aux4 ai skill playbook hook-after --request "deploy billing to staging and check its status" --history .agent/history/hook-two-success.json --baseUrl http://localhost:7295/api --model jev-1.13.0 --folder /tmp/aux4-skill-playbook-test/hook-playbooks; echo "exit=$?"
+```
+
+```expect
+exit=0
+```
+
+### with 2+ successful calls and jev above the threshold, suggests saving with the exact save command
+
+```beforeEach
+aux4 mock reset --name skill-playbook-hook-after-jev-test
+aux4 mock stub --name skill-playbook-hook-after-jev-test --method POST --path /v1/systemone --status 200 --body '{"model":"jev-1.13.0","answers":{"answer":{"type":"noul","noul":0.8}}}'
+```
+
+```execute
+TYPESAFE_API_KEY=test-key AUX4_INFERENCE_BROKER_URL= aux4 ai skill playbook hook-after --request "deploy billing to staging and check its status" --history .agent/history/hook-two-success.json --baseUrl http://localhost:7295/api --model jev-1.13.0 --folder /tmp/aux4-skill-playbook-test/hook-playbooks
+```
+
+```expect
+Save this as a playbook? Reply "save it" and I'll record it as deploy-billing-to-staging-and-check.
+Run: aux4 ai skill playbook save "deploy-billing-to-staging-and-check" --description "deploy billing to staging and check its status" --history .agent/history/hook-two-success.json --folder /tmp/aux4-skill-playbook-test/hook-playbooks
+```
+
+### hook-after must never call save itself -- the suggested playbook must not exist yet
+
+```execute
+aux4 ai skill playbook list --folder /tmp/aux4-skill-playbook-test/hook-playbooks | grep -c "deploy-billing-to-staging-and-check" || true
+```
+
+```expect
+0
+```
+
 ## delete
 
 ### should delete a saved playbook
