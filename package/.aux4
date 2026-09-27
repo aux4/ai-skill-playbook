@@ -1,0 +1,232 @@
+{
+  "scope": "agent",
+  "name": "skill-playbook",
+  "version": "0.1.0-local",
+  "license": "Apache-2.0",
+  "description": "Native agent skill: record, match and replay saved sequences of aux4 commands (playbooks) for a task",
+  "tags": [
+    "ai",
+    "skill",
+    "ai-skill",
+    "playbook",
+    "agent",
+    "classify"
+  ],
+  "dependencies": [
+    "aux4/ai-skill",
+    "aux4/classify-jev"
+  ],
+  "system": [
+    [
+      "test:node --version",
+      "brew:node"
+    ]
+  ],
+  "profiles": [
+    {
+      "name": "ai:skill",
+      "commands": [
+        {
+          "name": "playbook",
+          "execute": [
+            "profile:ai:skill:playbook"
+          ],
+          "help": {
+            "text": "Record, match and replay saved sequences of aux4 commands for a task"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ai:skill:playbook",
+      "commands": [
+        {
+          "name": "prompt",
+          "execute": [
+            "cat ${packageDir}/instructions/prompt.md"
+          ],
+          "help": {
+            "text": "Print the playbook workflow guidance (when to match, run, and suggest saving)"
+          }
+        },
+        {
+          "name": "list",
+          "execute": [
+            "node ${packageDir}/lib/playbook.mjs list values(folder)"
+          ],
+          "help": {
+            "text": "List saved playbooks with their id, params and success/failure counts",
+            "variables": [
+              {
+                "name": "folder",
+                "text": "Playbook storage folder",
+                "default": ".agent/playbooks"
+              }
+            ]
+          }
+        },
+        {
+          "name": "show",
+          "execute": [
+            "node ${packageDir}/lib/playbook.mjs show values(id, folder)"
+          ],
+          "help": {
+            "text": "Show a saved playbook's full definition (steps, params, version, counts)",
+            "variables": [
+              {
+                "name": "id",
+                "text": "Playbook id (from `list`)",
+                "arg": true
+              },
+              {
+                "name": "folder",
+                "text": "Playbook storage folder",
+                "default": ".agent/playbooks"
+              }
+            ]
+          }
+        },
+        {
+          "name": "save",
+          "execute": [
+            "node ${packageDir}/lib/playbook.mjs save values(name, description, params, history, steps, folder)"
+          ],
+          "help": {
+            "text": "Save a named playbook from an ai-agent history file or explicit steps. ALWAYS suggest this to the user first and only save after they agree -- never save silently. Never persist secret values: secret-shaped flag values are replaced with {{param}} placeholders automatically.",
+            "variables": [
+              {
+                "name": "name",
+                "text": "Playbook name (the id is derived from it; saving again under the same name adds a new version)",
+                "arg": true
+              },
+              {
+                "name": "description",
+                "text": "What the playbook does, in plain language (used for matching new requests to it)",
+                "default": ""
+              },
+              {
+                "name": "params",
+                "text": "Comma-separated names of the inputs the agent identified for this task (e.g. service,env)",
+                "default": ""
+              },
+              {
+                "name": "history",
+                "text": "Path to an ai-agent history file (.agent/history/<conversation>.json) to extract the executeAux4 command sequence from",
+                "default": ""
+              },
+              {
+                "name": "steps",
+                "text": "Explicit steps instead of --history: a JSON array of aux4 commands, e.g. [\"aux4 deploy run --env {{env}}\"]",
+                "default": ""
+              },
+              {
+                "name": "folder",
+                "text": "Playbook storage folder",
+                "default": ".agent/playbooks"
+              }
+            ]
+          }
+        },
+        {
+          "name": "match",
+          "execute": [
+            "node ${packageDir}/lib/playbook.mjs match values(request, folder, threshold, provider, model, baseUrl, apiKey)"
+          ],
+          "help": {
+            "text": "Decide whether a saved playbook fits a new request, using aux4/classify-jev to rank it against the stored playbooks. Call this before starting multi-step work.",
+            "variables": [
+              {
+                "name": "request",
+                "text": "The user's request or task, in plain language",
+                "arg": true
+              },
+              {
+                "name": "folder",
+                "text": "Playbook storage folder",
+                "default": ".agent/playbooks"
+              },
+              {
+                "name": "threshold",
+                "text": "Minimum confidence (0.0-1.0) required to report a match",
+                "default": "0.5"
+              },
+              {
+                "name": "provider",
+                "text": "Classification provider passed to `aux4 classify rank`",
+                "default": "jev",
+                "options": [
+                  "jev",
+                  "bm25"
+                ]
+              },
+              {
+                "name": "model",
+                "text": "Model id for the jev provider (advanced; usually left to the provider's default)",
+                "default": ""
+              },
+              {
+                "name": "baseUrl",
+                "text": "Override the jev provider API base URL (advanced; used for testing)",
+                "default": ""
+              },
+              {
+                "name": "apiKey",
+                "text": "TypeSafe API key for the jev provider",
+                "env": "TYPESAFE_API_KEY",
+                "hide": true,
+                "default": ""
+              }
+            ]
+          }
+        },
+        {
+          "name": "run",
+          "execute": [
+            "node ${packageDir}/lib/playbook.mjs run values(id, params, folder)"
+          ],
+          "help": {
+            "text": "Deterministically replay a saved playbook, substituting {{param}} placeholders. Stops at the first failing step and reports it so the agent can take over from there.",
+            "variables": [
+              {
+                "name": "id",
+                "text": "Playbook id (from `list` or `match`)",
+                "arg": true
+              },
+              {
+                "name": "params",
+                "text": "JSON object of param values to substitute, e.g. '{\"service\":\"billing\",\"env\":\"dev\"}'",
+                "default": ""
+              },
+              {
+                "name": "folder",
+                "text": "Playbook storage folder",
+                "default": ".agent/playbooks"
+              }
+            ]
+          }
+        },
+        {
+          "name": "delete",
+          "execute": [
+            "node ${packageDir}/lib/playbook.mjs delete values(id, folder)"
+          ],
+          "help": {
+            "text": "Delete a saved playbook",
+            "variables": [
+              {
+                "name": "id",
+                "text": "Playbook id (from `list`)",
+                "arg": true
+              },
+              {
+                "name": "folder",
+                "text": "Playbook storage folder",
+                "default": ".agent/playbooks"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
