@@ -1061,7 +1061,7 @@ exit=0
 
 ```beforeEach
 aux4 mock reset --name skill-playbook-hook-after-jev-test
-aux4 mock stub --name skill-playbook-hook-after-jev-test --method POST --path /v1/systemone --status 200 --body '{"model":"jev-1.13.0","answers":{"answer":{"type":"noul","noul":0.8}}}'
+aux4 mock stub --name skill-playbook-hook-after-jev-test --method POST --path /v1/systemone --status 200 --body '{"model":"jev-1.13.0","answers":{"answer":{"type":"noul","noul":0.9}}}'
 ```
 
 ```execute

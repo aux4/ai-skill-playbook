@@ -14,9 +14,19 @@ A suggestion is only printed when **all** of the following hold:
   conservative about the count, not exhaustive about every history shape);
 - **no saved playbook was just replayed** this turn (a call to `ai skill playbook run` in the
   history means there's nothing new to save);
-- asking jev (`aux4 classify ask --type noul`) "Is this a repeatable multi-step task worth saving as
-  a reusable playbook for future similar requests?" against the request and the commands that ran
-  returns a probability at or above `--threshold`.
+- asking jev (`aux4 classify ask --type noul`, model defaults to `jev-1.13.0`) "Would this exact
+  sequence of commands, with only the parameter values changed, be useful again for a similar future
+  request? Answer no if this was a one-time fix tied to a specific incident, error, person, or
+  timestamp rather than a repeatable task pattern." against the request and the commands that ran
+  returns a probability at or above `--threshold` (default `0.8`).
+
+  This wording was chosen after calibration: a simpler "is this a repeatable multi-step task"
+  question scored genuinely one-off, incident-specific debugging almost as high as reusable tasks
+  (both are structurally multi-step). Steering the question toward "same commands, different params"
+  and explicitly away from incident-specific fixes widened the gap enough for a fixed threshold —
+  repeatable tasks scored `0.82`-`0.91`, one-off tasks scored `0.64`-`0.79` across 12 real jev calls.
+  See the kb entry `ai-skill-playbook: hook-before/hook-after threshold calibration (real jev)` for
+  the full score table.
 
 Like `hook-before`, this hook **never fails the turn**: a missing `--request`/`--history`, a history
 file that doesn't exist or doesn't parse, or jev being unreachable — all result in printing nothing

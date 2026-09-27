@@ -170,7 +170,11 @@ Ranks the request against saved playbooks the same way `match` does, but **jev o
 fallback** — a lexical score isn't confident enough to hand the agent a ready-to-run command. On a
 confident match it prints the playbook id, its description, its params, and the exact `run` command
 to call, filling params from the request where the value is an obvious text match (best-effort — the
-agent should still sanity-check them):
+agent should still sanity-check them). The jev model defaults to `jev-1.13.0` (override with
+`--model`). Ranking uses each playbook's name + description **and its saved commands**, not just the
+description — calibrated against real jev to separate paraphrased matches (scored `0.56`-`0.94`)
+from related-but-different/unrelated requests (scored `0.01`-`0.31`) cleanly at the default
+`--threshold` of `0.5`:
 
 ```bash
 aux4 ai skill playbook hook-before --request "deploy the billing service to staging"
@@ -188,9 +192,13 @@ No match (or jev unavailable) prints nothing at all.
 ### hook-after — suggest saving a new playbook
 
 Looks at the turn's `executeAux4` calls in `--history`. When there are 2+ calls, at least 2
-succeeded, no saved playbook was just replayed, and jev (`aux4 classify ask --type noul`) scores the
-task as repeatable above `--threshold` (default `0.5`), it prints a suggestion plus the exact `save`
-command for the agent to run **only if the user agrees**:
+succeeded, no saved playbook was just replayed, and jev (`aux4 classify ask --type noul`, model
+defaults to `jev-1.13.0`) scores the task as repeatable at or above `--threshold` (default `0.8`,
+calibrated), it prints a suggestion plus the exact `save` command for the agent to run **only if the
+user agrees**. The question asks whether the *same commands with different parameter values* would
+be useful again, and explicitly steers away one-time incident-specific fixes — calibration against
+real jev showed genuinely repeatable tasks scoring `0.82`-`0.91` vs one-off debugging tasks scoring
+`0.64`-`0.79`, hence the `0.8` default:
 
 ```bash
 aux4 ai skill playbook hook-after \

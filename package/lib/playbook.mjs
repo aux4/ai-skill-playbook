@@ -566,13 +566,23 @@ function extractParamValue(request, paramName) {
   return m[1].replace(/^["']|["']$/g, "");
 }
 
+// Calibrated (see kb: ai-skill-playbook hook-before/hook-after threshold calibration):
+// ranking on name + description alone leaves some real paraphrases below a 0.5 jev
+// score. Including the playbook's actual commands in the ranked text widens the gap
+// between real matches and near-miss non-matches enough that the default --threshold
+// of 0.5 separates them cleanly (score table in the kb entry).
+function rankText(doc) {
+  const commands = (doc.steps || []).map(s => s.command).join("; ");
+  return `${doc.name}: ${doc.description || ""}${commands ? `\nCommands: ${commands}` : ""}`.trim();
+}
+
 function actionHookBefore({ request, folder, threshold, model, baseUrl, apiKey }) {
   try {
     if (!request) return;
     const docs = listPlaybooks(folder);
     if (docs.length === 0) return;
 
-    const blocks = docs.map(d => ({ id: d.id, text: `${d.name}: ${d.description || ""}`.trim() }));
+    const blocks = docs.map(d => ({ id: d.id, text: rankText(d) }));
     const thresholdNum = threshold ? Number(threshold) : 0.5;
     const args = ["classify", "rank", "--provider", "jev", "--question", request, "--blocks", JSON.stringify(blocks), "--top", "1"];
     if (model) args.push("--model", model);
@@ -674,11 +684,19 @@ function actionHookAfter({ request, historyFile, folder, threshold, model, baseU
     const successCount = calls.filter(c => c.success).length;
     if (successCount < 2) return;
 
-    const thresholdNum = threshold ? Number(threshold) : 0.5;
+    // Calibrated (see kb: ai-skill-playbook hook-before/hook-after threshold
+    // calibration) -- "repeatable multi-step task" alone scores one-off, specific-
+    // incident debugging almost as high as genuinely reusable tasks (both are
+    // structurally multi-step). Asking whether the SAME commands, with only
+    // parameter values changed, would be useful again -- and explicitly steering
+    // away one-time fixes tied to a specific incident/error/person/timestamp --
+    // widens the gap enough for a fixed default threshold of 0.8 to separate them
+    // cleanly (score table in the kb entry).
+    const thresholdNum = threshold ? Number(threshold) : 0.8;
     const state = `Request: ${request}\nCommands run:\n${calls.map(c => `- ${c.command}`).join("\n")}`;
     const args = [
       "classify", "ask",
-      "Is this a repeatable multi-step task worth saving as a reusable playbook for future similar requests?",
+      "Would this exact sequence of commands, with only the parameter values changed, be useful again for a similar future request? Answer no if this was a one-time fix tied to a specific incident, error, person, or timestamp rather than a repeatable task pattern.",
       "--type", "noul",
       "--state", state,
       "--threshold", String(thresholdNum),

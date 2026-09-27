@@ -1,7 +1,7 @@
 {
   "scope": "agent",
   "name": "skill-playbook",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "license": "Apache-2.0",
   "description": "Native agent skill: record, match and replay saved sequences of aux4 commands (playbooks) for a task",
   "tags": [
@@ -161,8 +161,8 @@
               },
               {
                 "name": "model",
-                "text": "Model id for the jev provider (advanced; usually left to the provider's default)",
-                "default": ""
+                "text": "Model id for the jev provider (advanced; override to use a different TypeSafe model)",
+                "default": "jev-1.13.0"
               },
               {
                 "name": "baseUrl",
@@ -204,8 +204,8 @@
               },
               {
                 "name": "model",
-                "text": "Model id for the jev provider (advanced; usually left to the provider's default)",
-                "default": ""
+                "text": "Model id for the jev provider (advanced; override to use a different TypeSafe model)",
+                "default": "jev-1.13.0"
               },
               {
                 "name": "baseUrl",
@@ -247,13 +247,13 @@
               },
               {
                 "name": "threshold",
-                "text": "Minimum jev probability (0.0-1.0) required to suggest saving",
-                "default": "0.5"
+                "text": "Minimum jev probability (0.0-1.0) required to suggest saving (calibrated default: 0.8 -- see man page)",
+                "default": "0.8"
               },
               {
                 "name": "model",
-                "text": "Model id for the jev provider (advanced; usually left to the provider's default)",
-                "default": ""
+                "text": "Model id for the jev provider (advanced; override to use a different TypeSafe model)",
+                "default": "jev-1.13.0"
               },
               {
                 "name": "baseUrl",

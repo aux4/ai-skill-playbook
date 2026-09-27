@@ -18,6 +18,15 @@ call — with each param filled in from the request when the value is obvious (a
 the param name), or left as a `{{param}}` placeholder otherwise. This is a best-effort fill, not
 guaranteed extraction — the caller should still sanity-check the params before running.
 
+The jev model defaults to `jev-1.13.0` (override with `--model` for a different TypeSafe model).
+Ranking is done against each playbook's name + description **and its saved commands** (not just the
+description) — this widens the gap between real matches and near-miss non-matches enough for the
+default `--threshold` of `0.5` to separate them cleanly. Calibrated against real jev with ~10
+paraphrased matches and ~10 related-but-different/unrelated requests across 4 saved playbooks: real
+matches scored `0.56`-`0.94`, non-matches scored `0.01`-`0.31` — see the kb entry
+`ai-skill-playbook: hook-before/hook-after threshold calibration (real jev)` for the full score
+table.
+
 `hook-before` never runs a playbook and never asks the user anything itself — it only prints
 instructions for the calling agent to act on.
 

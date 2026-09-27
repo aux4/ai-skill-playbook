@@ -35,7 +35,7 @@ aux4 ai skill playbook match <request> \
 --threshold   Minimum confidence required to report a match; only applies when jev actually ran (default: `0.5`)
 --provider    Classification provider passed to `aux4 classify rank` (default: `jev`)
 --folder      Playbook storage folder (default: `.agent/playbooks`)
---model       Model id for the jev provider (advanced)
+--model       Model id for the jev provider (default: `jev-1.13.0`)
 --baseUrl     Override the jev provider API base URL (advanced; used for testing)
 --apiKey      TypeSafe API key for the jev provider (reads `TYPESAFE_API_KEY` by default)
 
