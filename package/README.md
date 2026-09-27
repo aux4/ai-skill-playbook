@@ -70,12 +70,20 @@ under the same name updates it and bumps its `version`.
 ```
 
 Each step's `command` is a literal `aux4 ...` command with `{{param}}` placeholders for the inputs
-declared in `params`. `run` fills the placeholders from `--params` and executes the steps in order.
+declared in `params`. `run` fills the placeholders from `--params` and executes the steps in order;
+placeholders are substituted as discrete argv tokens (the step is never re-assembled into a string
+and handed to a shell), so a param value containing spaces, quotes, or shell metacharacters is always
+passed through literally and can never run as a second command. `--id` is validated against
+`^[a-z0-9-]+$` on every command, so it can never resolve outside `--folder`.
 
-**Secrets are never persisted.** When saving, any flag whose name looks like a password, token, API
-key or credential has its value replaced with a `{{param}}` placeholder automatically (the placeholder
-is added to the playbook's `params`), so the value itself is never written to disk — it must be
-supplied again on every `run`.
+**Secret-shaped values are redacted on a best-effort basis, not guaranteed to be caught.** When
+saving, a flag whose name looks like a credential (password/secret/token/apikey/key/credential(s)/
+passphrase/pat/auth/authorization, or the short flag `-p`), an `Authorization: Bearer ...` header
+value carried by any flag, and token-shaped values (`sk-...`, `ghp_...`, `xox...`, or a long
+high-entropy alphanumeric string) are replaced with a `{{param}}` placeholder automatically (the
+placeholder is added to the playbook's `params`), so the value itself is not written to disk in those
+cases — it must be supplied again on every `run`. This is a safety net, not a substitute for care:
+avoid saving a playbook whose steps carry a real secret value in the first place.
 
 ## Recording from an ai-agent conversation
 
@@ -92,12 +100,11 @@ aux4 ai skill playbook save "check-deploy-status" \
 
 Use `--steps` instead when there's no history file, or to hand-write/edit a playbook's steps directly.
 
-## Matching a request to a saved playbook
+## Matching a request to a saved playbook — jev decides, bm25 never does
 
 `match` compares a new request against every saved playbook's `name` + `description` using
 `aux4 classify rank --provider jev` (via `aux4/classify-jev`), and reports the best playbook whose
-score is at or above `--threshold` (default `0.5`). When the jev provider is unavailable, it falls
-back to the `bm25` provider automatically.
+score is at or above `--threshold` (default `0.5`).
 
 ```bash
 aux4 ai skill playbook match "what's the status of the billing service?" --threshold 0.6
@@ -118,6 +125,35 @@ aux4 ai skill playbook match "what's the status of the billing service?" --thres
 ```
 
 When nothing clears the threshold, `match` is `null` with a `reason`.
+
+**Only a jev probability counts as a confident match.** `classify rank` reports a `scale` of either
+`probability` (jev) or `relative` (bm25) — bm25's score is not comparable to a probability threshold,
+so it is never reported as a `match` or a `confidence`, whether `bm25` was requested explicitly or
+reached by falling back after jev failed. In both cases the response is `match: null` with a `reason`
+of `"jev-unavailable"` (fallback) or `"bm25-lexical-only"` (explicit `--provider bm25`), plus a
+`suggestions` list — each one explicitly labeled as lexical, not a confidence score:
+
+```bash
+aux4 ai skill playbook match "what's the status of the billing service?" --provider bm25
+```
+
+```json
+{
+  "match": null,
+  "reason": "bm25-lexical-only",
+  "provider": "bm25",
+  "candidates": 3,
+  "suggestions": [
+    {
+      "id": "check-deploy-status",
+      "name": "check-deploy-status",
+      "description": "Check the deployment status of a service",
+      "score": 0.82,
+      "note": "lexical match only -- jev did not run, this is not a confidence score"
+    }
+  ]
+}
+```
 
 ## Replaying a playbook
 

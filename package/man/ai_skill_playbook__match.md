@@ -5,11 +5,20 @@ saved playbook's `name` + `description` with `aux4 classify rank --provider jev`
 `aux4/classify-jev`). Returns the best playbook whose score is at or above `--threshold`, or
 `match: null` with a `reason` when nothing clears it.
 
-If the jev provider is unavailable (no `TYPESAFE_API_KEY`, network error, etc.), matching falls back
-to the `bm25` provider (offline, lexical) automatically and reports `"provider": "bm25"` in the
-result, so the caller can see which one actually decided.
+**Only a jev probability counts as a confident match.** `classify rank` reports a `scale` of either
+`probability` (the jev provider actually ran and decided) or `relative` (bm25 — lexical, not a
+probability). A `relative`-scale score is never reported as a `match` or a `confidence`, regardless
+of whether `bm25` was requested explicitly or reached by falling back after jev failed:
 
-With no playbooks saved in `--folder`, returns `match: null` immediately.
+- If the jev provider is unavailable (no `TYPESAFE_API_KEY`, network error, etc.), matching falls
+  back to the `bm25` provider (offline, lexical) automatically. The result is `match: null`,
+  `"reason": "jev-unavailable"`, `"provider": "bm25"`, plus a `suggestions` list of the top lexical
+  candidates, each explicitly labeled `"lexical match only -- jev did not run, this is not a
+  confidence score"`.
+- If `--provider bm25` is requested directly (e.g. for offline testing), the result is the same shape
+  with `"reason": "bm25-lexical-only"` instead.
+
+With no playbooks saved in `--folder`, returns `match: null` immediately (no provider is called).
 
 #### Usage
 
@@ -23,7 +32,7 @@ aux4 ai skill playbook match <request> \
 ```
 
 --request     The user's request or task, in plain language (required, positional)
---threshold   Minimum confidence required to report a match (default: `0.5`)
+--threshold   Minimum confidence required to report a match; only applies when jev actually ran (default: `0.5`)
 --provider    Classification provider passed to `aux4 classify rank` (default: `jev`)
 --folder      Playbook storage folder (default: `.agent/playbooks`)
 --model       Model id for the jev provider (advanced)
@@ -31,6 +40,8 @@ aux4 ai skill playbook match <request> \
 --apiKey      TypeSafe API key for the jev provider (reads `TYPESAFE_API_KEY` by default)
 
 #### Example
+
+A confident match — jev ran and its probability cleared the threshold:
 
 ```bash
 aux4 ai skill playbook match "deploy the billing service to staging"
@@ -50,7 +61,7 @@ aux4 ai skill playbook match "deploy the billing service to staging"
 }
 ```
 
-No match above the threshold:
+No match above the threshold (jev ran, but its probability was too low):
 
 ```json
 {
@@ -58,5 +69,25 @@ No match above the threshold:
   "reason": "best match scored 0.31 (< 0.5)",
   "provider": "jev",
   "candidates": 1
+}
+```
+
+jev unavailable — bm25 fallback, never a confident match:
+
+```json
+{
+  "match": null,
+  "reason": "jev-unavailable",
+  "provider": "bm25",
+  "candidates": 1,
+  "suggestions": [
+    {
+      "id": "deploy-service",
+      "name": "deploy-service",
+      "description": "Deploy a service to an environment and check its status",
+      "score": 0.82,
+      "note": "lexical match only -- jev did not run, this is not a confidence score"
+    }
+  ]
 }
 ```

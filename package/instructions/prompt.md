@@ -32,12 +32,17 @@ aux4 ai skill playbook match "<the user's request in plain language>"
   are and what the steps do, if you want to confirm the fit before running.
 - If a step in the run fails, the command stops there and reports the failing step — take over from
   that point yourself (don't just retry blindly); the rest of the task is still yours to finish.
-- If it returns `match: null` (no playbook cleared the confidence threshold), proceed with the task
-  yourself as you normally would.
+- If it returns `match: null`, proceed with the task yourself as you normally would.
 
-Matching uses `aux4/classify-jev` to compare the request against each saved playbook's name and
-description, falling back to a lexical ranking when the jev provider is unavailable. It is a
-suggestion, not a guarantee — use your judgment if a "match" doesn't actually fit what was asked.
+**jev decides — bm25 never does.** Matching asks `aux4/classify-jev` whether a saved playbook's
+description answers the request; only that probability-scale answer can produce a `match` with a
+`confidence`. When jev is unavailable, matching falls back to a lexical (bm25) ranking automatically
+— but a lexical score is relative, not a probability, so it is **never** reported as a `match` or a
+`confidence`. Instead you get `match: null` with `reason: "jev-unavailable"` (or `"bm25-lexical-only"`
+if bm25 was requested directly) and a `suggestions` list, each one explicitly labeled "lexical match
+only — jev did not run, this is not a confidence score." Treat those as a hint at best — read `show`
+on one before running it, if you use it at all; do not treat a suggestion the way you'd treat a
+`match`.
 
 ### 2. After the task: suggest saving it
 
@@ -62,18 +67,24 @@ When you do save:
 4. Write a clear `--description` — it's what `match` compares future requests against, so describe
    the task in the words a user would actually use to ask for it.
 
-You never need to redact secrets yourself — flag values that look like passwords, tokens, API keys
-or credentials are automatically replaced with a `{{param}}` placeholder before anything is written
-to disk. If `save` reports a `redacted` list, mention to the user that those values must be supplied
-again with `--params` on `run`; they are never stored.
+`save` makes a best effort to catch secret-shaped values automatically — flag names that look like a
+credential (password/secret/token/key/pat/auth/...), `-p`, an `Authorization: Bearer ...` header
+value carried by any flag, and token-shaped values (`sk-...`, `ghp_...`, `xox...`, long high-entropy
+strings) are replaced with a `{{param}}` placeholder before anything is written to disk. If `save`
+reports a `redacted` list, mention to the user that those values must be supplied again with
+`--params` on `run`; they are never stored. **This is best-effort, not a guarantee** — it will not
+catch every shape a secret can take. You should still avoid saving a playbook step that carries a
+raw secret value in the first place; when in doubt, use a `{{param}}` placeholder yourself and pass
+the value at `run` time instead of putting it in the saved command.
 
 ## Rules
 
 - Playbooks are aux4 commands only — never save a shell one-liner, a raw script, or anything that
   isn't a literal `aux4 ...` command.
 - Always suggest saving; never save without the user's agreement.
-- Never assume a `match` is correct — it's a ranked suggestion. A low-confidence or borderline match
-  is better handled by doing the task yourself than by running a playbook that doesn't really fit.
+- Never treat a lexical `suggestion` (bm25) the way you'd treat a `match` (jev) — only jev's
+  probability decides a real match. A low-confidence match, or a bare suggestion, is better handled
+  by doing the task yourself than by running a playbook that doesn't really fit.
 - On a failing step during `run`, stop and take over — don't loop retrying the same step blindly.
 - Prefer updating an existing playbook (save again under the same name) over creating a near-duplicate
   when the task is the same but the steps needed a small fix.

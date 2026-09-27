@@ -15,11 +15,21 @@ Steps come from exactly one of:
 Every step must be a literal `aux4 ...` command — anything else is rejected (scope is `aux4`
 commands only).
 
-**Secrets are never persisted.** Any flag whose name looks like a password, token, API key or
-credential (matched case-insensitively against `password`, `secret`, `token`, `apikey`, `api-key`,
-`credential`/`credentials`, `passphrase`) has its value replaced with a `{{paramName}}` placeholder
-before the file is written, and that name is added to the playbook's `params` automatically. The
-command reports which params were redacted this way in a `redacted` field, if any.
+**Secret-shaped values are redacted on a best-effort basis, not guaranteed.** Before the file is
+written:
+
+- a flag whose name is a whole-word match (after splitting camelCase/kebab-case, so `--path` is
+  never mistaken for `--pat`) against `password`, `secret`, `token`, `apikey`, `key`, `credential`/
+  `credentials`, `passphrase`, `pat`, `auth`, or `authorization`, or the short flag `-p`;
+- an `Authorization: Bearer ...` value, wherever it appears, regardless of which flag carries it
+  (e.g. `--header "Authorization: Bearer sk-..."`);
+- a value shaped like a real secret regardless of its flag name — `sk-...`, `gh(o|p|r|s|u)_...`,
+  `xox[baprs]-...`, or a long (20+ character) high-entropy alphanumeric string;
+
+has its value replaced with a `{{paramName}}` placeholder, and that name is added to the playbook's
+`params` automatically. The command reports which params were redacted this way in a `redacted`
+field, if any. This is a safety net, not a guarantee — it will not catch every shape a secret can
+take, so avoid saving a step that carries a real secret value in the first place.
 
 `--params` should name the inputs the caller identified for this task (e.g. a service name or an
 environment) — the corresponding `{{param}}` placeholders in the steps are filled in by `run`.

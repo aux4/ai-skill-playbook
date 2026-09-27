@@ -197,6 +197,80 @@ aux4 ai skill playbook show login --folder /tmp/aux4-skill-playbook-test/playboo
 --password {{password}}
 ```
 
+## secret redaction covers header/token/short-flag shapes (reviewer repro cases)
+
+Redaction is best-effort, not a guarantee (the agent should still avoid saving raw secrets) -- but it
+must catch these four shapes: an Authorization/Bearer header value carried by an unrelated flag name,
+`--key`, `--pat`, and the short flag `-p`.
+
+### an Authorization: Bearer value must be redacted regardless of the flag name carrying it
+
+```execute
+aux4 ai skill playbook save "auth-header" --steps '["aux4 curl --header \"Authorization: Bearer sk-LIVE-9999\" https://example.com"]' --folder /tmp/aux4-skill-playbook-test/playbooks | grep -c "sk-LIVE-9999" || true
+```
+
+```expect
+0
+```
+
+### the redacted step must keep the header structure with a {{authToken}} placeholder
+
+```execute
+aux4 ai skill playbook show auth-header --folder /tmp/aux4-skill-playbook-test/playbooks
+```
+
+```expect:partial
+Authorization: Bearer {{authToken}}
+```
+
+### --key must be redacted
+
+```execute
+aux4 ai skill playbook save "key-flag" --steps '["aux4 secret login --key abcdef1234567890"]' --folder /tmp/aux4-skill-playbook-test/playbooks | grep -c "abcdef1234567890" || true
+```
+
+```expect
+0
+```
+
+### --pat must be redacted (and --path must NOT be, whole-word match only)
+
+```execute
+aux4 ai skill playbook save "pat-flag" --steps '["aux4 secret login --pat ghp_zzzzzzzzzzzzzzzzzzzzzzzz"]' --folder /tmp/aux4-skill-playbook-test/playbooks | grep -c "ghp_zzzzzzzzzzzzzzzzzzzzzzzz" || true
+```
+
+```expect
+0
+```
+
+### -p must be redacted as a password
+
+```execute
+aux4 ai skill playbook save "short-p-flag" --steps '["aux4 secret login -p mypw"]' --folder /tmp/aux4-skill-playbook-test/playbooks | grep -c "mypw" || true
+```
+
+```expect
+0
+```
+
+### a --path flag must survive untouched (whole-word match, not a substring of "pat")
+
+```execute
+aux4 ai skill playbook save "path-flag" --steps '["aux4 config get --path some/normal/path"]' --folder /tmp/aux4-skill-playbook-test/playbooks | grep -c "redacted" || true
+```
+
+```expect
+0
+```
+
+```execute
+aux4 ai skill playbook show path-flag --folder /tmp/aux4-skill-playbook-test/playbooks | grep -c "some/normal/path"
+```
+
+```expect
+1
+```
+
 ## save --history extracts executeAux4 calls in order
 
 ```file:.agent/history/conv1.json
@@ -362,17 +436,193 @@ aux4 ai skill playbook show broken --folder /tmp/aux4-skill-playbook-test/playbo
 "failureCount": 1
 ```
 
-## match ranks a request against saved playbooks
-
-### with the bm25 provider (offline, no jev key needed)
+## run is injection-safe: params are argv tokens, never shell text
 
 ```execute
-aux4 ai skill playbook match "deploy billing service to staging" --provider bm25 --folder /tmp/aux4-skill-playbook-test/playbooks | grep -o '"id": "deploy-service"\|"provider": "bm25"'
+aux4 ai skill playbook save "note-taker" --params "note" --steps '["aux4 kb add --folder /tmp/aux4-skill-playbook-test/kb --topic note-taker-topic --content {{note}}"]' --folder /tmp/aux4-skill-playbook-test/playbooks | grep -o '"id": "note-taker"'
 ```
 
 ```expect
-"id": "deploy-service"
+"id": "note-taker"
+```
+
+### a param value with shell metacharacters must stay one literal argv token, never a second command
+
+```execute
+rm -f /tmp/aux4-skill-playbook-pwned && aux4 ai skill playbook run note-taker --params '{"note":"a; touch /tmp/aux4-skill-playbook-pwned"}' --folder /tmp/aux4-skill-playbook-test/playbooks | grep -o '"status": "success"'
+```
+
+```expect
+"status": "success"
+```
+
+### the injection attempt must not have created the file
+
+```execute
+ls /tmp/aux4-skill-playbook-pwned 2>&1 || echo "not created"
+```
+
+```expect:partial
+not created
+```
+
+### a param value with spaces must survive as one literal argument, not be split into several
+
+```execute
+aux4 ai skill playbook save "note-taker-2" --params "note" --steps '["aux4 kb add --folder /tmp/aux4-skill-playbook-test/kb --topic note-taker-topic-2 --content {{note}}"]' --folder /tmp/aux4-skill-playbook-test/playbooks | grep -o '"id": "note-taker-2"'
+```
+
+```expect
+"id": "note-taker-2"
+```
+
+```execute
+aux4 ai skill playbook run note-taker-2 --params '{"note":"hello there, this has several spaces in it"}' --folder /tmp/aux4-skill-playbook-test/playbooks | grep -o '"status": "success"'
+```
+
+```expect
+"status": "success"
+```
+
+```execute
+aux4 kb search --folder /tmp/aux4-skill-playbook-test/kb "hello there this has several spaces in it" | grep -c "hello there, this has several spaces in it"
+```
+
+```expect
+1
+```
+
+## --id path traversal is rejected on show/run/delete
+
+```file:.pwned-outside/leak.json
+{
+  "id": "leak",
+  "name": "leak",
+  "description": "",
+  "params": [],
+  "steps": [{ "command": "aux4 aux4 version" }],
+  "version": 1,
+  "createdAt": "x",
+  "updatedAt": "x",
+  "lastUsedAt": null,
+  "usedCount": 0,
+  "successCount": 0,
+  "failureCount": 0
+}
+```
+
+### show must reject an --id containing a path separator
+
+```execute
+aux4 ai skill playbook show "../.pwned-outside/leak" --folder /tmp/aux4-skill-playbook-test/playbooks
+```
+
+```error:partial
+Error: invalid playbook id*?
+```
+
+### run must reject an --id containing a path separator (not read or execute the file outside --folder)
+
+```execute
+aux4 ai skill playbook run "../.pwned-outside/leak" --folder /tmp/aux4-skill-playbook-test/playbooks
+```
+
+```error:partial
+Error: invalid playbook id*?
+```
+
+### delete must reject an --id containing a path separator
+
+```execute
+aux4 ai skill playbook delete "../.pwned-outside/leak" --folder /tmp/aux4-skill-playbook-test/playbooks
+```
+
+```error:partial
+Error: invalid playbook id*?
+```
+
+### the file outside --folder must still exist (traversal did not delete it either)
+
+```execute
+cat .pwned-outside/leak.json | grep -c '"id": "leak"'
+```
+
+```expect
+1
+```
+
+## run re-checks every step is an aux4 command (defense in depth against a tampered file)
+
+`save` already rejects a non-aux4 step, but a playbook file could be edited directly on disk after it
+was written. `run` must re-check every step before executing any of them.
+
+```file:aux4-skill-playbook-test-playbooks/crafted.json
+{
+  "id": "crafted",
+  "name": "crafted",
+  "description": "",
+  "params": [],
+  "steps": [
+    { "command": "aux4 aux4 version" },
+    { "command": "touch /tmp/aux4-skill-playbook-crafted-pwned" }
+  ],
+  "version": 1,
+  "createdAt": "x",
+  "updatedAt": "x",
+  "lastUsedAt": null,
+  "usedCount": 0,
+  "successCount": 0,
+  "failureCount": 0
+}
+```
+
+### run must refuse a playbook whose second step is not an aux4 command
+
+```execute
+rm -f /tmp/aux4-skill-playbook-crafted-pwned && cp aux4-skill-playbook-test-playbooks/crafted.json /tmp/aux4-skill-playbook-test/playbooks/crafted.json && aux4 ai skill playbook run crafted --folder /tmp/aux4-skill-playbook-test/playbooks
+```
+
+```error:partial
+Error: playbook "crafted" step 2 is not an aux4 command*?
+```
+
+### the crafted non-aux4 step must never have executed
+
+```execute
+ls /tmp/aux4-skill-playbook-crafted-pwned 2>&1 || echo "not created"
+```
+
+```expect:partial
+not created
+```
+
+## match ranks a request against saved playbooks -- jev decides, bm25 never confirms
+
+### with the bm25 provider (offline, no jev key needed) match is null, never confident
+
+bm25's scale is relative, not a probability -- jev decides whether a match is confident, so even an
+explicit `--provider bm25` request never reports a `match` or a `confidence`. It reports a labeled
+lexical suggestion instead.
+
+```execute
+aux4 ai skill playbook match "deploy billing service to staging" --provider bm25 --folder /tmp/aux4-skill-playbook-test/playbooks | grep -o '"match": null\|"reason": "bm25-lexical-only"\|"provider": "bm25"\|"id": "deploy-service"'
+```
+
+```expect
+"match": null
+"reason": "bm25-lexical-only"
 "provider": "bm25"
+"id": "deploy-service"
+```
+
+### bm25 output must never contain a confidence field
+
+```execute
+aux4 ai skill playbook match "deploy billing service to staging" --provider bm25 --folder /tmp/aux4-skill-playbook-test/playbooks | grep -c '"confidence":' || true
+```
+
+```expect
+0
 ```
 
 ### with no playbooks saved, match is null with a reason
@@ -427,14 +677,46 @@ TYPESAFE_API_KEY=test-key AUX4_INFERENCE_BROKER_URL= aux4 ai skill playbook matc
 "provider": "jev"
 ```
 
-### should fall back to bm25 when the jev provider is unreachable
+### should fall back to bm25 when the jev provider is unreachable, but never report a confident match
 
 ```execute
-TYPESAFE_API_KEY=test-key AUX4_INFERENCE_BROKER_URL= aux4 ai skill playbook match "deploy billing service to staging" --baseUrl http://localhost:1/api --folder /tmp/aux4-skill-playbook-test/playbooks
+TYPESAFE_API_KEY=test-key AUX4_INFERENCE_BROKER_URL= aux4 ai skill playbook match "deploy billing service to staging" --baseUrl http://localhost:1/api --folder /tmp/aux4-skill-playbook-test/playbooks | grep -o '"match": null\|"reason": "jev-unavailable"\|"provider": "bm25"'
+```
+
+```expect
+"match": null
+"reason": "jev-unavailable"
+"provider": "bm25"
+```
+
+### the bm25-fallback output must never contain a confidence field
+
+```execute
+TYPESAFE_API_KEY=test-key AUX4_INFERENCE_BROKER_URL= aux4 ai skill playbook match "deploy billing service to staging" --baseUrl http://localhost:1/api --folder /tmp/aux4-skill-playbook-test/playbooks | grep -c '"confidence":' || true
+```
+
+```expect
+0
+```
+
+### the fallback still reports a labeled lexical suggestion for the actual best fit
+
+```execute
+TYPESAFE_API_KEY=test-key AUX4_INFERENCE_BROKER_URL= aux4 ai skill playbook match "deploy billing service to staging" --baseUrl http://localhost:1/api --folder /tmp/aux4-skill-playbook-test/playbooks | grep -c '"id": "deploy-service"'
 ```
 
 ```expect:partial
-"provider": "bm25"
+1
+```
+
+### every suggestion in the fallback is labeled as lexical-only, not a confidence score
+
+```execute
+N=$(TYPESAFE_API_KEY=test-key AUX4_INFERENCE_BROKER_URL= aux4 ai skill playbook match "deploy billing service to staging" --baseUrl http://localhost:1/api --folder /tmp/aux4-skill-playbook-test/playbooks | grep -c "lexical match only -- jev did not run, this is not a confidence score"); [ "$N" -ge 1 ] && echo "labeled: yes" || echo "labeled: no"
+```
+
+```expect
+labeled: yes
 ```
 
 ## delete

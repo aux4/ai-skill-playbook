@@ -4,6 +4,9 @@ Prints a saved playbook's full definition: its steps (with `{{param}}` placehold
 resolved), declared params, version, and usage counts. Fails with an error if no playbook with the
 given id exists in `--folder`.
 
+`--id` is validated against `^[a-z0-9-]+$` before it is used to build a file path — an id containing
+`/`, `.`, or `..` is rejected outright, so it can never resolve outside `--folder`.
+
 #### Usage
 
 ```bash

@@ -1,7 +1,18 @@
 #### Description
 
-Deterministically replays a saved playbook: fills every `{{param}}` placeholder in its steps from
-`--params` (a JSON object), then executes each step's command in order.
+Deterministically replays a saved playbook: tokenizes each step's stored command (respecting quotes,
+the same way a shell would), fills every `{{param}}` placeholder from `--params` (a JSON object)
+token by token, and executes the result in order.
+
+**Injection-safe by construction.** A step is never re-assembled into a string and handed to a shell
+— it is spawned argv-to-argv (`shell:false`). A param value containing spaces, quotes, or shell
+metacharacters (`;`, `&&`, `` ` ``, `$(...)`, ...) is always passed through as one literal argument;
+it can never be interpreted as a second command or split into extra arguments.
+
+`--id` is validated against `^[a-z0-9-]+$` before it is used to build a file path, so it can never
+resolve outside `--folder` (no `--id ../../elsewhere`). Every step is also re-checked to be a literal
+`aux4 ...` command before anything runs — even though `save` already enforced this, a playbook file
+could have been edited by hand after it was written, and `run` does not trust it blindly.
 
 If any placeholder is missing a value, nothing is executed and the command reports the missing
 param name(s) up front. If a step exits non-zero, execution stops at that step — later steps are
@@ -17,7 +28,7 @@ successful run increments `successCount`, a stopped one increments `failureCount
 aux4 ai skill playbook run <id> [--params <json>] [--folder <path>]
 ```
 
---id       Playbook id, as reported by `list` or `match` (required, positional)
+--id       Playbook id, as reported by `list` or `match`; must match `^[a-z0-9-]+$` (required, positional)
 --params   JSON object of param values to substitute into the steps
 --folder   Playbook storage folder (default: `.agent/playbooks`)
 
