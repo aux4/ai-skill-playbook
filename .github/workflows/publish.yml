@@ -1,9 +1,12 @@
 name: Publish Package
 
+#   dev  -> dev hub
+#   main -> prod hub
 on:
   push:
     branches:
       - main
+      - dev
     paths:
       - '**'
       - '!.github/**'
@@ -24,7 +27,7 @@ on:
           - major
 
 concurrency:
-  group: publish-package
+  group: publish-package-${{ github.ref_name }}
   cancel-in-progress: false
 
 permissions:
@@ -69,9 +72,39 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Mint hub publish token
+        id: mint
+        env:
+          DEV_CLIENT_ID: ${{ secrets.AUX4_DEV_PUBLISHER_CLIENT_ID }}
+          DEV_CLIENT_SECRET: ${{ secrets.AUX4_DEV_PUBLISHER_CLIENT_SECRET }}
+          PROD_CLIENT_ID: ${{ secrets.AUX4_PUBLISHER_CLIENT_ID }}
+          PROD_CLIENT_SECRET: ${{ secrets.AUX4_PUBLISHER_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.ref_name }}" = "dev" ]; then
+            SSO_URL="https://dev.sso.aux4.io/token"
+            CLIENT_ID="$DEV_CLIENT_ID"; CLIENT_SECRET="$DEV_CLIENT_SECRET"
+          else
+            SSO_URL="https://sso.aux4.io/token"
+            CLIENT_ID="$PROD_CLIENT_ID"; CLIENT_SECRET="$PROD_CLIENT_SECRET"
+          fi
+          if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
+            echo "::error::Publisher client credentials not set for branch ${{ github.ref_name }}"
+            exit 1
+          fi
+          TOKEN=$(curl -sf -u "$CLIENT_ID:$CLIENT_SECRET" \
+            -d grant_type=client_credentials "$SSO_URL" | jq -r '.access_token // empty')
+          if [ -z "$TOKEN" ]; then
+            echo "::error::client_credentials mint returned no access_token from $SSO_URL"
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
       - uses: aux4/action@v1
         with:
           command: publish
           level: ${{ inputs.level || 'patch' }}
-          aux4_token: ${{ secrets.AUX4_ACCESS_TOKEN }}
+          aux4_token: ${{ steps.mint.outputs.token }}
+          registry: ${{ github.ref_name == 'dev' && 'https://dev.api.hub.aux4.io/v1/packages' || '' }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
