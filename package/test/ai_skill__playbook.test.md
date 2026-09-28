@@ -365,6 +365,124 @@ aux4 ai skill playbook save "nothing-to-save" --history .agent/history/empty.jso
 Error: no executeAux4 tool calls found*?
 ```
 
+## save --history dedupes, drops discovery/skill/failed calls, and infers params from --request
+
+A real ai-agent history often carries the SAME tool call twice: once in the LangChain-normalized
+shape (`tool_calls`) and once in the raw OpenAI shape (`additional_kwargs.tool_calls`), both keyed by
+the same tool-call id. It also mixes in `--help` discovery calls, the skill's own `ai skill playbook
+...` bookkeeping calls, and the occasional failed call. None of that belongs in a saved playbook.
+
+```file:.agent/history/messy.json
+[
+  { "role": "user", "content": "create a todo list named groceries (prefix GROC) with the item milk, then add the item eggs, then show the list" },
+  {
+    "role": "assistant_with_tool",
+    "content": {
+      "lc": 1, "type": "constructor", "id": ["langchain_core", "messages", "AIMessage"],
+      "kwargs": {
+        "content": "",
+        "additional_kwargs": { "tool_calls": [ { "function": { "name": "executeAux4", "arguments": "{\"command\": \"aux4 --help\"}" }, "type": "function", "id": "call_help" } ] },
+        "tool_calls": [ { "name": "executeAux4", "args": { "command": "aux4 --help" }, "type": "tool_call", "id": "call_help" } ]
+      }
+    }
+  },
+  { "role": "tool", "content": "aux4\naux4 utility...", "tool_call_id": "call_help", "name": "executeAux4" },
+  {
+    "role": "assistant_with_tool",
+    "content": {
+      "lc": 1, "type": "constructor", "id": ["langchain_core", "messages", "AIMessage"],
+      "kwargs": {
+        "content": "",
+        "additional_kwargs": { "tool_calls": [ { "function": { "name": "executeAux4", "arguments": "{\"command\": \"aux4 ai skill playbook hook-before --request x\"}" }, "type": "function", "id": "call_hook" } ] },
+        "tool_calls": [ { "name": "executeAux4", "args": { "command": "aux4 ai skill playbook hook-before --request x" }, "type": "tool_call", "id": "call_hook" } ]
+      }
+    }
+  },
+  { "role": "tool", "content": "", "tool_call_id": "call_hook", "name": "executeAux4" },
+  {
+    "role": "assistant_with_tool",
+    "content": {
+      "lc": 1, "type": "constructor", "id": ["langchain_core", "messages", "AIMessage"],
+      "kwargs": {
+        "content": "",
+        "additional_kwargs": { "tool_calls": [ { "function": { "name": "executeAux4", "arguments": "{\"command\": \"aux4 todo new --name groceries --prefix GROC --item milk --file ./.todo.json\"}" }, "type": "function", "id": "call_new" } ] },
+        "tool_calls": [ { "name": "executeAux4", "args": { "command": "aux4 todo new --name groceries --prefix GROC --item milk --file ./.todo.json" }, "type": "tool_call", "id": "call_new" } ]
+      }
+    }
+  },
+  { "role": "tool", "content": "Todo 'groceries' [GROC] created.", "tool_call_id": "call_new", "name": "executeAux4" },
+  {
+    "role": "assistant_with_tool",
+    "content": {
+      "lc": 1, "type": "constructor", "id": ["langchain_core", "messages", "AIMessage"],
+      "kwargs": {
+        "content": "",
+        "additional_kwargs": { "tool_calls": [ { "function": { "name": "executeAux4", "arguments": "{\"command\": \"aux4 todo new --name groceries --prefix GROC --item flour --file ./.todo.json\"}" }, "type": "function", "id": "call_failed" } ] },
+        "tool_calls": [ { "name": "executeAux4", "args": { "command": "aux4 todo new --name groceries --prefix GROC --item flour --file ./.todo.json" }, "type": "tool_call", "id": "call_failed" } ]
+      }
+    }
+  },
+  { "role": "tool", "content": "Error: todo list 'groceries' already exists", "tool_call_id": "call_failed", "name": "executeAux4" },
+  {
+    "role": "assistant_with_tool",
+    "content": {
+      "lc": 1, "type": "constructor", "id": ["langchain_core", "messages", "AIMessage"],
+      "kwargs": {
+        "content": "",
+        "additional_kwargs": { "tool_calls": [ { "function": { "name": "executeAux4", "arguments": "{\"command\": \"aux4 todo add --name groceries --item eggs --file ./.todo.json\"}" }, "type": "function", "id": "call_add" } ] },
+        "tool_calls": [ { "name": "executeAux4", "args": { "command": "aux4 todo add --name groceries --item eggs --file ./.todo.json" }, "type": "tool_call", "id": "call_add" } ]
+      }
+    }
+  },
+  { "role": "tool", "content": "GROC-002 added to 'groceries'.", "tool_call_id": "call_add", "name": "executeAux4" },
+  {
+    "role": "assistant_with_tool",
+    "content": {
+      "lc": 1, "type": "constructor", "id": ["langchain_core", "messages", "AIMessage"],
+      "kwargs": {
+        "content": "",
+        "additional_kwargs": { "tool_calls": [ { "function": { "name": "executeAux4", "arguments": "{\"command\": \"aux4 todo view --name groceries --file ./.todo.json\"}" }, "type": "function", "id": "call_view" } ] },
+        "tool_calls": [ { "name": "executeAux4", "args": { "command": "aux4 todo view --name groceries --file ./.todo.json" }, "type": "tool_call", "id": "call_view" } ]
+      }
+    }
+  },
+  { "role": "tool", "content": "## groceries [GROC]\n  GROC-001: [ ] milk\n  GROC-002: [ ] eggs", "tool_call_id": "call_view", "name": "executeAux4" }
+]
+```
+
+### should save exactly 3 steps -- no duplicates, no --help, no skill-bookkeeping, no failed call
+
+```execute
+aux4 ai skill playbook save "create-todo-list" --description "Create a todo list named groceries (prefix GROC) with the item milk, then add the item eggs, then show the list" --request "create a todo list named groceries (prefix GROC) with the item milk, then add the item eggs, then show the list" --history .agent/history/messy.json --folder /tmp/aux4-skill-playbook-test/playbooks | grep -o '"id": "create-todo-list"\|"steps": 3'
+```
+
+```expect
+"id": "create-todo-list"
+"steps": 3
+```
+
+### the saved steps must be the 3 task commands, in order, each once, with request-matched values turned into params
+
+```execute
+aux4 ai skill playbook show create-todo-list --folder /tmp/aux4-skill-playbook-test/playbooks | grep -o '"command": "[^"]*"'
+```
+
+```expect
+"command": "aux4 todo new --name {{name}} --prefix {{prefix}} --item {{item}} --file ./.todo.json"
+"command": "aux4 todo add --name {{name}} --item {{item2}} --file ./.todo.json"
+"command": "aux4 todo view --name {{name}} --file ./.todo.json"
+```
+
+### params are inferred from --request: the repeated --name/--prefix collapse to one param each, the two distinct --item values get numbered names, and --file (not in the request) stays literal
+
+```execute
+aux4 ai skill playbook show create-todo-list --folder /tmp/aux4-skill-playbook-test/playbooks | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{console.log(JSON.parse(d).params.join(","));});'
+```
+
+```expect
+name,prefix,item,item2
+```
+
 ## run replays a playbook deterministically
 
 ### should fill params and execute the steps in order, reporting success
@@ -776,6 +894,9 @@ TYPESAFE_API_KEY=test-key AUX4_INFERENCE_BROKER_URL= aux4 ai skill playbook hook
 Playbook match: deploy-service (confidence 0.9)
 Deploy a service to an environment and check its status
 Params: service, env
+Guessed from your request:
+  service = billing
+  env = staging
 Run: aux4 ai skill playbook run --id deploy-service --params '{"service":"billing","env":"staging"}'
 ```
 
@@ -783,7 +904,7 @@ Run: aux4 ai skill playbook run --id deploy-service --params '{"service":"billin
 
 ```beforeEach
 aux4 mock reset --name skill-playbook-hook-before-jev-test
-aux4 mock stub --name skill-playbook-hook-before-jev-test --method POST --path /v1/systemone --status 200 --body '{"model":"jev-1.13.0","answers":{"blk0":{"type":"noul","noul":0.3}}}'
+aux4 mock stub --name skill-playbook-hook-before-jev-test --method POST --path /v1/systemone --status 200 --body '{"model":"jev-1.13.0","answers":{"blk0":{"type":"noul","noul":0.1}}}'
 ```
 
 ```execute
@@ -802,6 +923,37 @@ TYPESAFE_API_KEY=test-key AUX4_INFERENCE_BROKER_URL= aux4 ai skill playbook hook
 
 ```expect
 exit=0
+```
+
+### guessing params handles a "named X" phrasing and numbered params (item, item2) from repeated occurrences -- not a literal word boundary bug on "named"
+
+A naive `name` regex without word boundaries matches inside "na**me**d" and grabs the next letter as
+if it were the value; a numbered param like `item2` has no literal "item2" in the request -- it
+means "the 2nd occurrence of `item`".
+
+```execute
+aux4 ai skill playbook save "create-todo-list" --description "Create a todo list with a name, prefix, and items, then show it" --params "name,prefix,item,item2" --steps '["aux4 todo new --name {{name}} --prefix {{prefix}} --item {{item}} --file .todo.json", "aux4 todo add --name {{name}} --item {{item2}} --file .todo.json", "aux4 todo view --name {{name}} --file .todo.json"]' --folder /tmp/aux4-skill-playbook-test/named-param-hook-playbooks | grep -o '"id": "create-todo-list"'
+```
+
+```expect
+"id": "create-todo-list"
+```
+
+```beforeEach
+aux4 mock reset --name skill-playbook-hook-before-jev-test
+aux4 mock stub --name skill-playbook-hook-before-jev-test --method POST --path /v1/systemone --status 200 --body '{"model":"jev-1.13.0","answers":{"blk0":{"type":"noul","noul":0.9}}}'
+```
+
+```execute
+TYPESAFE_API_KEY=test-key AUX4_INFERENCE_BROKER_URL= aux4 ai skill playbook hook-before --request "create a todo list named hardware (prefix HW) with the item nails, then add the item screws, then show the list" --baseUrl http://localhost:7294/api --folder /tmp/aux4-skill-playbook-test/named-param-hook-playbooks
+```
+
+```expect:partial
+Guessed from your request:
+  name = hardware
+  prefix = HW
+  item = nails
+  item2 = screws
 ```
 
 ## hook-after -- deterministic post-task hook (jev decides if worth saving, never saves itself)
@@ -1069,18 +1221,106 @@ TYPESAFE_API_KEY=test-key AUX4_INFERENCE_BROKER_URL= aux4 ai skill playbook hook
 ```
 
 ```expect
-Save this as a playbook? Reply "save it" and I'll record it as deploy-billing-to-staging-and-check.
-Run: aux4 ai skill playbook save "deploy-billing-to-staging-and-check" --description "deploy billing to staging and check its status" --history .agent/history/hook-two-success.json --folder /tmp/aux4-skill-playbook-test/hook-playbooks
+Save this as a playbook? Reply "save it" and I'll record it as run-deploy.
+Run: aux4 ai skill playbook save "run-deploy" --description "deploy billing to staging and check its status" --request "deploy billing to staging and check its status" --history .agent/history/hook-two-success.json --folder /tmp/aux4-skill-playbook-test/hook-playbooks
 ```
 
 ### hook-after must never call save itself -- the suggested playbook must not exist yet
 
 ```execute
-aux4 ai skill playbook list --folder /tmp/aux4-skill-playbook-test/hook-playbooks | grep -c "deploy-billing-to-staging-and-check" || true
+aux4 ai skill playbook list --folder /tmp/aux4-skill-playbook-test/hook-playbooks | grep -c "run-deploy" || true
 ```
 
 ```expect
 0
+```
+
+## hook-after suppresses the suggestion when an existing playbook already covers the request
+
+```beforeAll
+mkdir -p /tmp/aux4-skill-playbook-test/hook-existing
+aux4 mock start --port 7296 --name skill-playbook-hook-existing-test
+sleep 1
+```
+
+```afterAll
+aux4 mock stop --name skill-playbook-hook-existing-test
+```
+
+```execute
+aux4 ai skill playbook save "backup-database" --description "Back up the database and upload it to storage" --steps '["aux4 db backup --name {{name}}","aux4 storage upload --file {{file}}"]' --folder /tmp/aux4-skill-playbook-test/hook-existing | grep -o '"id": "backup-database"'
+```
+
+```expect
+"id": "backup-database"
+```
+
+```file:.agent/history/hook-covered.json
+[
+  { "role": "user", "content": "back up the prod database and upload it to storage" },
+  {
+    "role": "assistant_with_tool",
+    "content": {
+      "lc": 1,
+      "type": "constructor",
+      "id": ["langchain_core", "messages", "AIMessage"],
+      "kwargs": {
+        "content": "",
+        "tool_calls": [
+          { "name": "executeAux4", "args": { "command": "aux4 db backup --name prod" }, "type": "tool_call", "id": "call_1" }
+        ]
+      }
+    }
+  },
+  {
+    "role": "tool",
+    "content": {
+      "lc": 1,
+      "type": "constructor",
+      "id": ["langchain_core", "messages", "ToolMessage"],
+      "kwargs": { "content": "backed up", "tool_call_id": "call_1", "name": "executeAux4" }
+    }
+  },
+  {
+    "role": "assistant_with_tool",
+    "content": {
+      "lc": 1,
+      "type": "constructor",
+      "id": ["langchain_core", "messages", "AIMessage"],
+      "kwargs": {
+        "content": "",
+        "tool_calls": [
+          { "name": "executeAux4", "args": { "command": "aux4 storage upload --file backup.sql" }, "type": "tool_call", "id": "call_2" }
+        ]
+      }
+    }
+  },
+  {
+    "role": "tool",
+    "content": {
+      "lc": 1,
+      "type": "constructor",
+      "id": ["langchain_core", "messages", "ToolMessage"],
+      "kwargs": { "content": "uploaded", "tool_call_id": "call_2", "name": "executeAux4" }
+    }
+  }
+]
+```
+
+### should print nothing -- even though the "worth saving" question would say yes, an existing playbook already matches
+
+```beforeEach
+aux4 mock reset --name skill-playbook-hook-existing-test
+aux4 mock stub --name skill-playbook-hook-existing-test --method POST --path /v1/systemone --when-body-contains "blk0" --status 200 --body '{"model":"jev-1.13.0","answers":{"blk0":{"type":"noul","noul":0.95}}}'
+aux4 mock stub --name skill-playbook-hook-existing-test --method POST --path /v1/systemone --when-body-contains "\"answer\":{\"type\":\"noul\"" --status 200 --body '{"model":"jev-1.13.0","answers":{"answer":{"type":"noul","noul":0.95}}}'
+```
+
+```execute
+TYPESAFE_API_KEY=test-key AUX4_INFERENCE_BROKER_URL= aux4 ai skill playbook hook-after --request "back up the prod database and upload it to storage" --history .agent/history/hook-covered.json --baseUrl http://localhost:7296/api --model jev-1.13.0 --folder /tmp/aux4-skill-playbook-test/hook-existing; echo "exit=$?"
+```
+
+```expect
+exit=0
 ```
 
 ## delete

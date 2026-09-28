@@ -179,35 +179,90 @@ function isAux4Command(tokens) {
 
 // --- extracting executeAux4 calls from an aux4/ai-agent history file -------
 
-// Recursively scans the parsed history JSON for tool calls named `executeAux4`,
-// in either the LangChain shape (`{name, args:{command}}`) or the raw
-// OpenAI shape (`{function:{name, arguments: "<json>"}}`), and returns the
-// commands in the order they were called.
-function extractExecuteAux4Commands(node, out = []) {
-  if (!node || typeof node !== "object") return out;
-  if (Array.isArray(node)) {
-    for (const item of node) extractExecuteAux4Commands(item, out);
-    return out;
-  }
-  if (node.name === "executeAux4" && node.args && typeof node.args.command === "string") {
-    out.push(node.args.command);
-  } else if (node.function && node.function.name === "executeAux4" && typeof node.function.arguments === "string") {
-    try {
-      const args = JSON.parse(node.function.arguments);
-      if (typeof args.command === "string") out.push(args.command);
-    } catch {
-      // skip malformed arguments
-    }
-  }
-  for (const value of Object.values(node)) {
-    if (value && typeof value === "object") extractExecuteAux4Commands(value, out);
-  }
-  return out;
-}
-
 function toFullForm(command) {
   const trimmed = String(command || "").trim();
   return /^aux4(\s|$)/.test(trimmed) ? trimmed : `aux4 ${trimmed}`;
+}
+
+// Recursively scans the parsed history JSON for tool calls named `executeAux4`
+// and their matching results, and returns each call ONCE, in order, with a
+// best-effort `success` flag.
+//
+// A single real tool call is often present TWICE in an ai-agent history: the
+// LangChain-normalized shape (`tool_calls: [{name, args:{command}, id}]`) and
+// the raw OpenAI shape (`additional_kwargs.tool_calls: [{function:{name,
+// arguments}, id}]`) both carry the SAME call, keyed by the SAME id -- this
+// walk dedupes by that id so a call is never counted, saved, or replayed
+// twice.
+function extractToolCalls(history) {
+  const seen = new Set();
+  const calls = [];
+  const results = {};
+
+  function walk(node) {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item);
+      return;
+    }
+
+    if (
+      typeof node.id === "string" && !seen.has(node.id) &&
+      node.name === "executeAux4" && node.args && typeof node.args.command === "string"
+    ) {
+      seen.add(node.id);
+      calls.push({ id: node.id, command: node.args.command });
+    } else if (
+      typeof node.id === "string" && !seen.has(node.id) &&
+      node.function && node.function.name === "executeAux4" && typeof node.function.arguments === "string"
+    ) {
+      try {
+        const args = JSON.parse(node.function.arguments);
+        if (typeof args.command === "string") {
+          seen.add(node.id);
+          calls.push({ id: node.id, command: args.command });
+        }
+      } catch {
+        // skip malformed arguments
+      }
+    } else if (node.tool_call_id && node.name === "executeAux4" && typeof node.content === "string") {
+      if (!(node.tool_call_id in results)) results[node.tool_call_id] = node.content;
+    }
+
+    for (const value of Object.values(node)) {
+      if (value && typeof value === "object") walk(value);
+    }
+  }
+  walk(history);
+
+  return calls.map(c => {
+    const content = results[c.id];
+    const success = content === undefined || !/^\s*error[: ]/i.test(content);
+    return { id: c.id, command: toFullForm(c.command), success };
+  });
+}
+
+// A discovery call (`--help`, `--whereIsIt`) or the skill's own `ai skill
+// playbook ...` calls are never part of the task itself -- they're either
+// exploration or bookkeeping, and saving/counting them just pollutes the
+// playbook with noise (or, for `ai skill playbook run`, an infinite loop).
+function isDiscoveryOrSkillCommand(command) {
+  const c = String(command || "");
+  if (/(^|\s)--help(\s|$)/.test(c)) return true;
+  if (/(^|\s)--whereIsIt(\s|$)/.test(c)) return true;
+  if (/\bai\s+skill\s+playbook\b/.test(c)) return true;
+  return false;
+}
+
+function extractSuccessfulCalls(history) {
+  return extractToolCalls(history).filter(c => c.success);
+}
+
+// The deduped, filtered task steps a playbook should actually be made of (or
+// that a post-task hook should count): every real `executeAux4` call, once,
+// that succeeded, minus discovery and the skill's own bookkeeping calls.
+function extractTaskSteps(history) {
+  return extractSuccessfulCalls(history).filter(c => !isDiscoveryOrSkillCommand(c.command));
 }
 
 // --- secret redaction on save ------------------------------------------------
@@ -331,16 +386,95 @@ function stepsFromHistory(file) {
   } catch (e) {
     fail(`could not parse history file "${file}": ${e.message}`);
   }
-  const commands = extractExecuteAux4Commands(history);
-  if (commands.length === 0) {
+  const steps = extractTaskSteps(history).map(c => c.command);
+  if (steps.length === 0) {
     fail(`no executeAux4 tool calls found in "${file}"`);
   }
-  return commands.map(cmd => toFullForm(cmd));
+  return steps;
+}
+
+// --- deterministic param inference from the request --------------------------
+//
+// A saved playbook is only reusable if the instance-specific values in its
+// steps (a name, a prefix, an item) became {{param}} placeholders -- otherwise
+// `run` always replays the exact same literals. Rather than guess semantically,
+// this looks for an exact (word-boundary, case-insensitive) match between a
+// flag's value in the command and a substring of the ORIGINAL request: if the
+// value came from the request, it's an input, not fixed structure.
+//
+// The same flag name reused with the SAME value (e.g. --name groceries on
+// every step) becomes one param; the same flag name with a DIFFERENT value
+// (e.g. --item milk, then --item eggs) becomes a second param, numbered
+// (item, item2, item3, ...) rather than overwritten.
+function escapeRegExp(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function inferParamsFromRequest(rawSteps, request) {
+  const requestText = String(request || "");
+  if (!requestText) return { steps: rawSteps, params: [] };
+
+  const valueToParam = new Map(); // "flag::value" -> paramName
+  const flagCounts = new Map(); // flagBase -> how many distinct values seen so far
+  const params = [];
+
+  function paramNameFor(flag, value) {
+    const key = `${flag}::${value.toLowerCase()}`;
+    if (valueToParam.has(key)) return valueToParam.get(key);
+    const base = String(flag).replace(/[^A-Za-z0-9]/g, "") || "param";
+    const seenCount = flagCounts.get(base) || 0;
+    const name = seenCount === 0 ? base : `${base}${seenCount + 1}`;
+    flagCounts.set(base, seenCount + 1);
+    valueToParam.set(key, name);
+    params.push(name);
+    return name;
+  }
+
+  function valueIsInRequest(value) {
+    const v = String(value || "").trim();
+    if (!v) return false;
+    return new RegExp(`\\b${escapeRegExp(v)}\\b`, "i").test(requestText);
+  }
+
+  const steps = rawSteps.map(raw => {
+    let tokens;
+    try {
+      tokens = tokenize(raw);
+    } catch {
+      return raw;
+    }
+    for (let i = 0; i < tokens.length; i++) {
+      const t = tokens[i];
+
+      const inline = t.match(/^(--[A-Za-z][A-Za-z0-9-]*)=(.+)$/);
+      if (inline) {
+        const flag = inline[1].slice(2);
+        const value = inline[2];
+        if (!/^\{\{.*\}\}$/.test(value) && valueIsInRequest(value)) {
+          tokens[i] = `${inline[1]}={{${paramNameFor(flag, value)}}}`;
+        }
+        continue;
+      }
+
+      const flagToken = t.match(/^--[A-Za-z][A-Za-z0-9-]*$/);
+      if (flagToken && i + 1 < tokens.length) {
+        const flag = t.slice(2);
+        const value = tokens[i + 1];
+        if (value && !/^\{\{.*\}\}$/.test(value) && valueIsInRequest(value)) {
+          tokens[i + 1] = `{{${paramNameFor(flag, value)}}}`;
+          i++;
+        }
+      }
+    }
+    return tokens.map(quoteToken).join(" ");
+  });
+
+  return { steps, params };
 }
 
 // --- save --------------------------------------------------------------------
 
-function actionSave({ name, description, params, historyFile, stepsJson, folder }) {
+function actionSave({ name, description, params, historyFile, stepsJson, folder, request }) {
   if (!name) fail("--name is required");
   let rawSteps;
   if (stepsJson) {
@@ -366,7 +500,18 @@ function actionSave({ name, description, params, historyFile, stepsJson, folder 
     }
   }
 
+  // Explicit --params is always kept (an override, never suppressed by
+  // inference); inference only ADDS params for flag values that trace back to
+  // the request text, on top of whatever the caller already declared.
   const declaredParams = new Set(parseCsv(params));
+  let inferredParamNames = [];
+  if (request) {
+    const inferred = inferParamsFromRequest(rawSteps, request);
+    rawSteps = inferred.steps;
+    inferredParamNames = inferred.params;
+    for (const p of inferredParamNames) declaredParams.add(p);
+  }
+
   const steps = [];
   const allRedactions = [];
   for (const raw of rawSteps) {
@@ -408,6 +553,9 @@ function actionSave({ name, description, params, historyFile, stepsJson, folder 
 
   savePlaybookFile(folder, doc);
   const out = { saved: summary(doc) };
+  if (inferredParamNames.length) {
+    out.inferredParams = [...new Set(inferredParamNames)];
+  }
   if (allRedactions.length) {
     out.redacted = [...new Set(allRedactions)];
     out.warning = "Secret-shaped values were replaced with {{param}} placeholders and never written to disk (best-effort -- avoid saving raw secrets in the first place).";
@@ -559,47 +707,121 @@ function actionMatch({ request, folder, threshold, provider, model, baseUrl, api
 // phrase. Returns null when nothing obvious is found -- the caller falls back to
 // a `{{param}}` placeholder so the agent knows to fill it in itself.
 function extractParamValue(request, paramName) {
-  const escaped = String(paramName).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = new RegExp(`${escaped}\\s*(?:is|=|:|to)?\\s*("[^"]+"|'[^']+'|[A-Za-z0-9_.-]+)`, "i");
-  const m = String(request || "").match(re);
-  if (!m) return null;
-  return m[1].replace(/^["']|["']$/g, "");
+  const text = String(request || "");
+
+  // A numbered param (item2, item3, ...) from `inferParamsFromRequest`'s
+  // collision handling means "the Nth occurrence of the `item` flag", so look
+  // for the Nth "item <value>" mention in the request, not a literal "item2".
+  const numbered = String(paramName).match(/^([A-Za-z]+?)(\d+)$/);
+  const base = numbered ? numbered[1] : String(paramName);
+  const occurrence = numbered ? Number(numbered[2]) : 1;
+
+  // `\b` on both sides so "name" never matches inside "named" and grabs the
+  // next letter as if it were the value; "named"/"called" are common English
+  // lead-ins for a `name` param specifically ("a todo list named groceries").
+  const leadIns = [escapeRegExp(base)];
+  if (base.toLowerCase() === "name") leadIns.push("named", "called");
+  const re = new RegExp(`\\b(?:${leadIns.join("|")})\\b\\s*(?:is|=|:|to)?\\s*("[^"]+"|'[^']+'|[A-Za-z0-9_.-]+)`, "gi");
+
+  let match;
+  let count = 0;
+  while ((match = re.exec(text)) !== null) {
+    count++;
+    if (count === occurrence) return match[1].replace(/^["']|["']$/g, "");
+  }
+  return null;
 }
 
 // Calibrated (see kb: ai-skill-playbook hook-before/hook-after threshold calibration):
-// ranking on name + description alone leaves some real paraphrases below a 0.5 jev
-// score. Including the playbook's actual commands in the ranked text widens the gap
-// between real matches and near-miss non-matches enough that the default --threshold
-// of 0.5 separates them cleanly (score table in the kb entry).
+// ranking on name + description alone leaves some real paraphrases too close to
+// unrelated requests. Adding the playbook's shape -- which subcommands it uses and
+// which inputs it needs -- widens the gap enough for a fixed default threshold to
+// separate them cleanly (score table in the kb entry).
+//
+// IMPORTANT: this is prose ("Uses: todo new, todo add. Inputs: name, item."), never
+// the literal `--flag {{value}}` commands. `aux4 classify rank` silently SKIPS a
+// block it decides "looks like JSON/script data", and a real multi-step,
+// multi-{{param}} playbook's raw commands (`--name {{name}} --item {{item}} ...`
+// repeated across several lines) reliably tripped that guard -- hook-before found
+// NO match at all against an otherwise-good playbook, silently, with no error.
+// Summarizing the subcommands and param NAMES (not the flag syntax) never
+// triggers it and still gives jev the playbook's shape to rank against.
 function rankText(doc) {
-  const commands = (doc.steps || []).map(s => s.command).join("; ");
-  return `${doc.name}: ${doc.description || ""}${commands ? `\nCommands: ${commands}` : ""}`.trim();
+  const steps = doc.steps || [];
+  const uses = steps
+    .map(s => {
+      const words = [];
+      for (const t of String(s.command || "").split(/\s+/)) {
+        if (!t || t === "aux4") continue;
+        if (t.startsWith("-")) break;
+        words.push(t);
+      }
+      return words.join(" ");
+    })
+    .filter(Boolean);
+  const params = doc.params || [];
+
+  // Deliberately does NOT include `doc.description`. `hook-after` suggests the
+  // raw user request as the description by default (and a caller may pass
+  // anything), which usually bakes in THIS run's literal instance data (a
+  // name, an item) -- ranking on that text measurably hurts matching a later,
+  // similar-but-different request (a real paraphrase scored 0.11 with the
+  // literal description included vs 0.29 without it, same playbook, same
+  // query). Uses/Inputs is already generic -- it names subcommands and PARAM
+  // NAMES, never instance values -- so it's safe to rank on regardless of
+  // what the description says.
+  let text = doc.name || "";
+  if (uses.length) text += ` Uses: ${uses.join(", ")}.`;
+  if (params.length) text += ` Inputs: ${params.join(", ")}.`;
+  return text.trim();
+}
+
+// Shared by hook-before (offer a match) and hook-after (don't suggest saving a
+// duplicate): ranks the request against saved playbooks with jev only (no
+// bm25 fallback -- a lexical score isn't confident enough for either use) and
+// returns the best playbook at or above threshold, or null.
+//
+// Default 0.15, calibrated against real jev with the prose rankText above
+// (see kb entry). jev's per-block score is genuinely noisy in this regime,
+// and runs meaningfully lower when there's only ONE saved playbook to rank
+// against (the common early case) than when there are several to contrast:
+// a real paraphrase against a single candidate scored as low as ~0.19 in one
+// exact live run, and ~0.29-0.46 in isolated testing of similar requests --
+// vs same-domain non-matches at ~0.01-0.22 in that same regime. 0.15 is set
+// low enough to still catch the weaker end of that range (favoring recall --
+// finding no match at all was the original bug). The tradeoff: with several
+// similar playbooks saved, a near-miss can score as high as ~0.5, so false
+// matches get more likely as the library grows lookalike entries -- override
+// with --threshold (or --matchThreshold on hook-after) if that happens.
+function findConfidentPlaybookMatch({ request, folder, threshold, model, baseUrl, apiKey }) {
+  const docs = listPlaybooks(folder);
+  if (docs.length === 0) return null;
+
+  const blocks = docs.map(d => ({ id: d.id, text: rankText(d) }));
+  const thresholdNum = threshold != null ? Number(threshold) : 0.15;
+  const args = ["classify", "rank", "--provider", "jev", "--question", request, "--blocks", JSON.stringify(blocks), "--top", "1"];
+  if (model) args.push("--model", model);
+  if (baseUrl) args.push("--baseUrl", baseUrl);
+  if (apiKey) args.push("--apiKey", apiKey);
+
+  const result = runAux4(args);
+  if (result.scale !== "probability") return null;
+
+  const best = (result.blocks || [])[0];
+  if (!best || best.score < thresholdNum) return null;
+
+  const doc = docs.find(d => d.id === best.id);
+  if (!doc) return null;
+  return { doc, score: best.score };
 }
 
 function actionHookBefore({ request, folder, threshold, model, baseUrl, apiKey }) {
   try {
     if (!request) return;
-    const docs = listPlaybooks(folder);
-    if (docs.length === 0) return;
 
-    const blocks = docs.map(d => ({ id: d.id, text: rankText(d) }));
-    const thresholdNum = threshold ? Number(threshold) : 0.5;
-    const args = ["classify", "rank", "--provider", "jev", "--question", request, "--blocks", JSON.stringify(blocks), "--top", "1"];
-    if (model) args.push("--model", model);
-    if (baseUrl) args.push("--baseUrl", baseUrl);
-    if (apiKey) args.push("--apiKey", apiKey);
-
-    // hook-before only trusts jev's own decision -- no bm25 fallback here (unlike
-    // `match`): a lexical score is not confident enough to hand an agent a ready-
-    // to-run command.
-    const result = runAux4(args);
-    if (result.scale !== "probability") return;
-
-    const best = (result.blocks || [])[0];
-    if (!best || best.score < thresholdNum) return;
-
-    const doc = docs.find(d => d.id === best.id);
-    if (!doc) return;
+    const match = findConfidentPlaybookMatch({ request, folder, threshold, model, baseUrl, apiKey });
+    if (!match) return;
+    const { doc, score } = match;
 
     const params = doc.params || [];
     const filled = {};
@@ -609,60 +831,68 @@ function actionHookBefore({ request, folder, threshold, model, baseUrl, apiKey }
     }
 
     const lines = [
-      `Playbook match: ${doc.id} (confidence ${round(best.score)})`,
+      `Playbook match: ${doc.id} (confidence ${round(score)})`,
       doc.description || doc.name,
-      `Params: ${params.length ? params.join(", ") : "none"}`,
-      `Run: aux4 ai skill playbook run --id ${doc.id} --params '${JSON.stringify(filled)}'`
+      `Params: ${params.length ? params.join(", ") : "none"}`
     ];
+    // Spelled out one per line (not just the JSON blob) so a small model can
+    // see at a glance what it guessed for each param before running it.
+    if (params.length) {
+      lines.push("Guessed from your request:");
+      for (const p of params) lines.push(`  ${p} = ${filled[p]}`);
+    }
+    lines.push(`Run: aux4 ai skill playbook run --id ${doc.id} --params '${JSON.stringify(filled)}'`);
     console.log(lines.join("\n"));
   } catch {
     // any failure -- jev down, no playbooks, malformed response -- prints nothing
   }
 }
 
-// Walks an ai-agent history file and returns every executeAux4 call in order,
-// each with a best-effort `success` flag from its matching tool result (an
-// aux4 error always starts with "Error", by convention across the CLI). When a
-// call's result can't be found (e.g. a raw OpenAI-shaped history with no
-// tool_call_id correlation available), it is treated as successful -- this
-// function only needs to be conservative about the count of successful calls,
-// not exhaustive about every history shape.
-function extractExecuteAux4CallsWithResults(history) {
-  const calls = [];
-  const results = {};
+// Turns the task's actual commands into a short, task-shaped name (e.g.
+// `create-todo-list`), instead of slugging the first words of the request
+// (which tends to include filler like "using-aux4-commands-create-a-todo").
+// Looks at the FIRST task step's profile + subcommand (e.g. `todo new`),
+// normalizes the verb to a small canonical set, and maps a couple of known
+// nouns to their more natural phrase; anything unrecognized falls back to the
+// raw words, and a request with no usable step falls back to a short slug of
+// the request itself.
+const VERB_SYNONYMS = {
+  new: "create", create: "create", init: "create",
+  add: "add",
+  view: "view", show: "view", list: "view", get: "view",
+  update: "update", set: "update", edit: "update",
+  delete: "delete", remove: "delete",
+  run: "run", release: "release", deploy: "deploy", publish: "publish"
+};
+const NOUN_SYNONYMS = { todo: "todo-list", kb: "kb-entry" };
 
-  function walk(node) {
-    if (!node || typeof node !== "object") return;
-    if (Array.isArray(node)) {
-      for (const item of node) walk(item);
-      return;
+function suggestPlaybookName(taskSteps, fallbackRequest) {
+  const first = taskSteps && taskSteps[0];
+  if (first) {
+    let tokens;
+    try {
+      tokens = tokenize(first.command);
+    } catch {
+      tokens = null;
     }
-    if (node.name === "executeAux4" && node.args && typeof node.args.command === "string") {
-      calls.push({ id: node.id || null, command: node.args.command });
-    } else if (node.function && node.function.name === "executeAux4" && typeof node.function.arguments === "string") {
-      try {
-        const args = JSON.parse(node.function.arguments);
-        if (typeof args.command === "string") calls.push({ id: node.id || null, command: args.command });
-      } catch {
-        // skip malformed arguments
+    if (tokens) {
+      const rest = tokens[0] === "aux4" ? tokens.slice(1) : tokens;
+      const words = [];
+      for (const t of rest) {
+        if (t.startsWith("-")) break;
+        words.push(t.toLowerCase());
       }
-    } else if (node.tool_call_id && node.name === "executeAux4" && typeof node.content === "string") {
-      results[node.tool_call_id] = node.content;
-    }
-    for (const value of Object.values(node)) {
-      if (value && typeof value === "object") walk(value);
+      if (words.length >= 2) {
+        const [noun, verb] = words;
+        return slugify(`${VERB_SYNONYMS[verb] || verb}-${NOUN_SYNONYMS[noun] || noun}`);
+      }
+      if (words.length === 1) return slugify(words[0]);
     }
   }
-  walk(history);
-
-  return calls.map(c => {
-    const content = c.id ? results[c.id] : undefined;
-    const success = content === undefined || !/^\s*error[: ]/i.test(content);
-    return { command: toFullForm(c.command), success };
-  });
+  return slugify(String(fallbackRequest || "playbook").split(/\s+/).slice(0, 4).join(" "));
 }
 
-function actionHookAfter({ request, historyFile, folder, threshold, model, baseUrl, apiKey }) {
+function actionHookAfter({ request, historyFile, folder, threshold, matchThreshold, model, baseUrl, apiKey }) {
   try {
     if (!request || !historyFile) return;
     if (!fs.existsSync(historyFile)) return;
@@ -674,15 +904,19 @@ function actionHookAfter({ request, historyFile, folder, threshold, model, baseU
       return;
     }
 
-    const calls = extractExecuteAux4CallsWithResults(history);
-    if (calls.length < 2) return;
+    // "no playbook was just run" -- checked against ALL successful calls
+    // (before filtering out the skill's own commands below), since `run`
+    // itself is one of those filtered-out commands.
+    const successfulCalls = extractSuccessfulCalls(history);
+    if (successfulCalls.some(c => /\bai\s+skill\s+playbook\s+run\b/.test(c.command))) return;
 
-    // "no playbook was just run" -- if the agent already replayed a saved
-    // playbook this turn, there is nothing new to suggest saving.
-    if (calls.some(c => /\bai\s+skill\s+playbook\s+run\b/.test(c.command))) return;
+    const taskSteps = successfulCalls.filter(c => !isDiscoveryOrSkillCommand(c.command));
+    if (taskSteps.length < 2) return;
 
-    const successCount = calls.filter(c => c.success).length;
-    if (successCount < 2) return;
+    // If a saved playbook already confidently matches this request, there's
+    // nothing new to suggest -- this is exactly what just ran (or could have).
+    const existing = findConfidentPlaybookMatch({ request, folder, threshold: matchThreshold, model, baseUrl, apiKey });
+    if (existing) return;
 
     // Calibrated (see kb: ai-skill-playbook hook-before/hook-after threshold
     // calibration) -- "repeatable multi-step task" alone scores one-off, specific-
@@ -693,7 +927,7 @@ function actionHookAfter({ request, historyFile, folder, threshold, model, baseU
     // widens the gap enough for a fixed default threshold of 0.8 to separate them
     // cleanly (score table in the kb entry).
     const thresholdNum = threshold ? Number(threshold) : 0.8;
-    const state = `Request: ${request}\nCommands run:\n${calls.map(c => `- ${c.command}`).join("\n")}`;
+    const state = `Request: ${request}\nCommands run:\n${taskSteps.map(c => `- ${c.command}`).join("\n")}`;
     const args = [
       "classify", "ask",
       "Would this exact sequence of commands, with only the parameter values changed, be useful again for a similar future request? Answer no if this was a one-time fix tied to a specific incident, error, person, or timestamp rather than a repeatable task pattern.",
@@ -712,11 +946,12 @@ function actionHookAfter({ request, historyFile, folder, threshold, model, baseU
     if (res.error || res.status !== 0) return;
 
     const folderArg = folder || ".agent/playbooks";
-    const suggestedName = slugify(request.split(/\s+/).slice(0, 6).join(" "));
+    const suggestedName = suggestPlaybookName(taskSteps, request);
     const description = String(request).replace(/"/g, '\\"');
+    const requestArg = String(request).replace(/"/g, '\\"');
     const lines = [
       `Save this as a playbook? Reply "save it" and I'll record it as ${suggestedName}.`,
-      `Run: aux4 ai skill playbook save "${suggestedName}" --description "${description}" --history ${historyFile} --folder ${folderArg}`
+      `Run: aux4 ai skill playbook save "${suggestedName}" --description "${description}" --request "${requestArg}" --history ${historyFile} --folder ${folderArg}`
     ];
     console.log(lines.join("\n"));
   } catch {
@@ -828,8 +1063,8 @@ switch (action) {
     break;
   }
   case "save": {
-    const [name, description, params, historyFile, stepsJson, folder] = rest;
-    actionSave({ name, description, params, historyFile, stepsJson, folder });
+    const [name, description, params, historyFile, stepsJson, folder, request] = rest;
+    actionSave({ name, description, params, historyFile, stepsJson, folder, request });
     break;
   }
   case "match": {
@@ -848,8 +1083,8 @@ switch (action) {
     break;
   }
   case "hook-after": {
-    const [request, historyFile, folder, threshold, model, baseUrl, apiKey] = rest;
-    actionHookAfter({ request, historyFile, folder, threshold, model, baseUrl, apiKey });
+    const [request, historyFile, folder, threshold, matchThreshold, model, baseUrl, apiKey] = rest;
+    actionHookAfter({ request, historyFile, folder, threshold, matchThreshold, model, baseUrl, apiKey });
     break;
   }
   case "delete": {

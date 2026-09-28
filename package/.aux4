@@ -1,7 +1,7 @@
 {
   "scope": "agent",
   "name": "skill-playbook",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "license": "Apache-2.0",
   "description": "Native agent skill: record, match and replay saved sequences of aux4 commands (playbooks) for a task",
   "tags": [
@@ -89,10 +89,10 @@
         {
           "name": "save",
           "execute": [
-            "node ${packageDir}/lib/playbook.mjs save values(name, description, params, history, steps, folder)"
+            "node ${packageDir}/lib/playbook.mjs save values(name, description, params, history, steps, folder, request)"
           ],
           "help": {
-            "text": "Save a named playbook from an ai-agent history file or explicit steps. ALWAYS suggest this to the user first and only save after they agree -- never save silently. Never persist secret values: secret-shaped flag values are replaced with {{param}} placeholders automatically.",
+            "text": "Save a named playbook from an ai-agent history file or explicit steps. ALWAYS suggest this to the user first and only save after they agree -- never save silently. Never persist secret values: secret-shaped flag values are replaced with {{param}} placeholders automatically. Flag values that also appear in --request are turned into {{param}} placeholders too, so the playbook is reusable with different inputs.",
             "variables": [
               {
                 "name": "name",
@@ -106,7 +106,7 @@
               },
               {
                 "name": "params",
-                "text": "Comma-separated names of the inputs the agent identified for this task (e.g. service,env)",
+                "text": "Comma-separated names of the inputs the agent identified for this task (e.g. service,env). Kept as-is; --request may add more on top of these.",
                 "default": ""
               },
               {
@@ -123,6 +123,11 @@
                 "name": "folder",
                 "text": "Playbook storage folder",
                 "default": ".agent/playbooks"
+              },
+              {
+                "name": "request",
+                "text": "The original user request, in plain language. Any command flag value that also appears in this text is deterministically turned into a {{param}} placeholder (named after the flag: name, prefix, item, item2, ...), so the playbook can be reused with different values.",
+                "default": ""
               }
             ]
           }
@@ -199,8 +204,8 @@
               },
               {
                 "name": "threshold",
-                "text": "Minimum confidence (0.0-1.0) required to report a match",
-                "default": "0.5"
+                "text": "Minimum confidence (0.0-1.0) required to report a match (calibrated default: 0.15 -- see man page)",
+                "default": "0.15"
               },
               {
                 "name": "model",
@@ -225,10 +230,10 @@
         {
           "name": "hook-after",
           "execute": [
-            "node ${packageDir}/lib/playbook.mjs hook-after values(request, history, folder, threshold, model, baseUrl, apiKey)"
+            "node ${packageDir}/lib/playbook.mjs hook-after values(request, history, folder, threshold, matchThreshold, model, baseUrl, apiKey)"
           ],
           "help": {
-            "text": "Deterministic post-task hook: if the run made 2+ executeAux4 calls that succeeded and no saved playbook was just replayed, ask jev whether this looks like a repeatable task worth saving. Above --threshold, prints a one-line suggestion for the user plus the exact `save` command to run next turn if they agree. Prints nothing otherwise, or on any failure. Never saves by itself. Always exits 0.",
+            "text": "Deterministic post-task hook: if the run made 2+ real task steps that succeeded, no saved playbook was just replayed, and no existing playbook already confidently matches the request, ask jev whether this looks like a repeatable task worth saving. Above --threshold, prints a one-line suggestion for the user plus the exact `save` command to run next turn if they agree. Prints nothing otherwise, or on any failure. Never saves by itself. Always exits 0.",
             "variables": [
               {
                 "name": "request",
@@ -249,6 +254,11 @@
                 "name": "threshold",
                 "text": "Minimum jev probability (0.0-1.0) required to suggest saving (calibrated default: 0.8 -- see man page)",
                 "default": "0.8"
+              },
+              {
+                "name": "matchThreshold",
+                "text": "Minimum confidence (0.0-1.0) for the 'an existing playbook already covers this' pre-check that suppresses a duplicate suggestion (calibrated default: 0.15 -- see man page)",
+                "default": "0.15"
               },
               {
                 "name": "model",
