@@ -165,6 +165,18 @@ aux4 ai skill playbook save "not-aux4" --steps '["rm -rf /tmp/whatever"]' --fold
 Error: step is not an aux4 command*?
 ```
 
+## save drops the skill's own bookkeeping calls from --steps
+
+### should drop an `aux4 ai skill playbook ...` step, the same as --history does
+
+```execute
+aux4 ai skill playbook save "no-self-calls" --description "test" --steps '["aux4 ai skill playbook match \"deploy billing\"", "aux4 deploy status --service billing"]' --folder /tmp/aux4-skill-playbook-test/playbooks | grep -o '"steps": [0-9]*'
+```
+
+```expect
+"steps": 1
+```
+
 ## secret redaction on save
 
 ### should redact a secret-shaped flag value and add it as a param

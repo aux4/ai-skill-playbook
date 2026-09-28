@@ -6,6 +6,29 @@ library of proven sequences over time.
 
 Scope is **aux4 commands only** — a playbook is a list of `aux4 ...` commands, nothing else.
 
+## Enable in an agent
+
+To wire the deterministic hooks into your own instructions (e.g. `AGENTS.md` or system prompt),
+paste this verbatim:
+
+```
+# Playbooks
+
+You have saved playbooks of aux4 commands.
+
+1. BEFORE doing any task that needs aux4 commands, run:
+   aux4 ai skill playbook hook-before --request "<the user's request>"
+   If it prints a "Run:" line, run exactly that command and report its output. Do not redo the steps yourself.
+2. AFTER finishing a task where you ran 2 or more aux4 commands, run:
+   aux4 ai skill playbook hook-after --request "<the user's request>" --history <your history file>
+   If it prints a suggestion, add it verbatim at the end of your answer.
+3. If the user says "save it", run the exact save command from the suggestion.
+```
+
+Replace `<your history file>` with the path to your own conversation history file (the same file
+you'd pass to `save --history`). Keep the numbered BEFORE/AFTER wording as-is — it was live-tested;
+a stricter "FIRST tool call" phrasing made small models skip the step entirely.
+
 **Note:** `hook-before` and `hook-after` are the SAME workflow below, packaged as two single
 commands instead of you calling `match`/deciding to suggest a save yourself. Nothing in this skill
 or in `aux4/ai-agent` calls them for you automatically — wire them into your own instructions (e.g.

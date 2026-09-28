@@ -15,6 +15,29 @@ skills (`memory`, `knowledge`, `web`, `delegate`, `messenger`). It depends only 
 aux4 aux4 pkger install agent/skill-playbook
 ```
 
+## Enable in an agent
+
+Add this to the agent's own instructions (e.g. `AGENTS.md` or system prompt) to wire in the
+deterministic hooks — paste it verbatim:
+
+```
+# Playbooks
+
+You have saved playbooks of aux4 commands.
+
+1. BEFORE doing any task that needs aux4 commands, run:
+   aux4 ai skill playbook hook-before --request "<the user's request>"
+   If it prints a "Run:" line, run exactly that command and report its output. Do not redo the steps yourself.
+2. AFTER finishing a task where you ran 2 or more aux4 commands, run:
+   aux4 ai skill playbook hook-after --request "<the user's request>" --history <your history file>
+   If it prints a suggestion, add it verbatim at the end of your answer.
+3. If the user says "save it", run the exact save command from the suggestion.
+```
+
+Replace `<your history file>` with the path to your own conversation history file (the same file
+you'd pass to `save --history`). Keep the numbered BEFORE/AFTER wording as-is — it was live-tested;
+a stricter "FIRST tool call" phrasing made small models skip the step entirely.
+
 ## Quick Start
 
 ```bash
@@ -28,7 +51,7 @@ aux4 ai skill playbook save "deploy-service" \
 aux4 ai skill playbook match "deploy the billing service to staging"
 
 # replay it
-aux4 ai skill playbook run deploy-service/deploy-service --params '{"service":"billing","env":"staging"}'
+aux4 ai skill playbook run deploy-service --params '{"service":"billing","env":"staging"}'
 ```
 
 ## Commands

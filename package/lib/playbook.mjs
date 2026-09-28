@@ -488,6 +488,11 @@ function actionSave({ name, description, params, historyFile, stepsJson, folder,
     // ai-agent's stripped form is expected and gets prefixed), a non-aux4 step here is
     // rejected rather than silently coerced into looking like one.
     rawSteps = rawSteps.map(s => (typeof s === "string" ? s : s.command).trim());
+    // Same guard --history relies on (via extractTaskSteps): never let the skill's
+    // own `aux4 ai skill playbook ...` bookkeeping calls become a playbook step --
+    // `run` replaying one would recurse/loop.
+    rawSteps = rawSteps.filter(s => !isDiscoveryOrSkillCommand(s));
+    if (rawSteps.length === 0) fail("--steps must be a non-empty JSON array");
   } else if (historyFile) {
     rawSteps = stepsFromHistory(historyFile);
   } else {

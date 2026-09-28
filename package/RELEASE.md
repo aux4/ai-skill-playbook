@@ -1,3 +1,19 @@
+# Release 0.2.3
+
+Round-3 review fixes.
+
+## Fixes
+
+- **Agent-instructions snippet.** README and `prompt` output now include a ready-to-paste "Enable
+  in an agent" section with the validated `AGENTS.md` wording (live-tested; a stricter "FIRST tool
+  call" phrasing made small models skip the step) for wiring `hook-before`/`hook-after` into an
+  agent's own instructions.
+- **Quick Start typo.** `run <id>` in the README used `deploy-service/deploy-service` — `<id>` must
+  match `^[a-z0-9-]+$`, so the correct example is `run deploy-service`.
+- **`save --steps` self-call guard.** `save --steps` now drops any step that is the skill's own
+  `aux4 ai skill playbook ...` call, the same guard `save --history` already applied — a step like
+  that replaying via `run` would otherwise recurse/loop.
+
 # Release 0.2.2
 
 Fixes to `hook-before`/`hook-after` found by a live end-to-end test with a local model driven purely
